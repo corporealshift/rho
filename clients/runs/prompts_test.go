@@ -19,8 +19,11 @@ func TestSessionPrompts(t *testing.T) {
 	}{
 		{"brief", BriefPrompt(r, "user: add a median"), []string{r.File(BriefFile), "user: add a median", `"run: brief"`}, true},
 		{"plan", PlanPrompt(r), []string{r.File(BriefFile), r.File(PlanFile), `"run: plan"`, expectation,
-			`headed exactly "## Decisions"`, "the question, what the plan chooses, the alternative"}, true},
+			`"## Decisions"`, "the question, what the plan chooses, the alternative", "already holds the plan's outline",
+			"from the brief alone, before you read any code", "Read in proportion to the change", "about two pages",
+			"Write no code, signatures or class designs"}, true},
 		{"tasks", TasksPrompt(r), []string{r.File(PlanFile), r.File(TasksFile), "3 to 8", "- [ ]", `"run: tasks"`,
+			"Keep each entry to a few lines", "Write no code, signatures or class designs",
 			"Read the check, " + verify, "exactly one task", "under the exact name " + verify + " uses"}, true},
 		{"verify", VerifyPrompt(r), []string{verify, "exits 0 only when the brief is done", "must fail now", `"run: verify"`,
 			"the way CI is written", "did not run at all", "never the text of the code", expectation,
@@ -48,9 +51,13 @@ func TestSessionPrompts(t *testing.T) {
 		})
 	}
 	// The steps that plan draft in their file, not their thinking
-	// (docs/specs/2026-10-17-plan-in-the-file-design.md).
+	// (docs/specs/2026-10-17-plan-in-the-file-design.md). The plan fills in
+	// its outline a section at a time (2026-10-18-plan-outline).
+	if p := PlanPrompt(r); !strings.Contains(p, "Do not draft the whole plan before writing the first section") ||
+		!strings.Contains(p, "a summary keeps only what is in a file") {
+		t.Error("plan is not told to fill in its outline as it goes")
+	}
 	for name, p := range map[string][2]string{
-		"plan":   {PlanPrompt(r), r.File(PlanFile)},
 		"tasks":  {TasksPrompt(r), r.File(TasksFile)},
 		"verify": {VerifyPrompt(r), verify},
 	} {
@@ -150,7 +157,7 @@ func TestClaudePrompts(t *testing.T) {
 		want         []string
 	}{
 		{"plan-review", PlanReviewPrompt(r), []string{r.File(PlanFile), Begin(PlanFile), End(PlanFile), "NO CHANGES", expectation,
-			"keep every entry", "Changed by review: the plan chose X", `"Added by review"`}},
+			"keep every entry", "Changed by review: the plan chose X", `"Added by review"`, "about two pages with no code"}},
 		{"verify-review, failing before", VerifyReviewPrompt(r, false, "exit 1"), []string{"it fails", Begin(VerifyFile), "APPROVED", "Git Bash",
 			"the way CI would", "checks behavior only", "Take out any such check", expectation,
 			"rules out or says is not needed", "Take out any named test that goes beyond the brief", "needs no test of its own"}},
@@ -187,5 +194,21 @@ func TestClaudePrompts(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The outline the runner writes has the plan's sections, with Decisions last,
+// since the pull request takes the decisions from the end of the plan.
+func TestThePlanOutline(t *testing.T) {
+	last := -1
+	for _, h := range []string{"## Approach", "## Files", "## Order", "## Testing", "## Risks", DecisionsHeading} {
+		i := strings.Index(PlanOutline, "\n"+h+"\n")
+		if i < 0 || i < last {
+			t.Fatalf("%s is missing or out of order", h)
+		}
+		last = i
+	}
+	if strings.Contains(PlanOutline[last+1:], "\n## ") {
+		t.Error("the decisions must be the last section")
 	}
 }

@@ -621,7 +621,7 @@ func TestAWholeRun(t *testing.T) {
 		t.Fatalf("run ended at %q (%s)\nlog:\n%s", r.Step, r.Why, g.log.String())
 	}
 	want := []string{
-		"run: brief", "session: " + r.File(PlanFile), "session: " + r.File(VerifyFile), "session: " + r.File(TasksFile),
+		"run: brief", "run: plan outline", "session: " + r.File(PlanFile), "session: " + r.File(VerifyFile), "session: " + r.File(TasksFile),
 		"session: stats.go", "run: task 1 done", "session: stats_test.go", "run: task 2 done",
 	}
 	if got := g.git.messages(); !slices.Equal(got, want) {
@@ -1143,6 +1143,46 @@ func TestAPlanningStepMayWriteOnlyItsFile(t *testing.T) {
 	}
 	if p := g.d.sessions["S1"].prompts[0]; !strings.Contains(p, "Write only "+r.File(PlanFile)) {
 		t.Errorf("the plan prompt does not say so:\n%s", p)
+	}
+}
+
+// A plan session starts from the outline, committed before it began, and one
+// that leaves it as it is has not planned
+// (docs/specs/2026-10-18-plan-outline-design.md).
+func TestAPlanSessionFillsInTheOutline(t *testing.T) {
+	g := newRig(t)
+	g.ask("H1", "Add a Median function")
+	g.tick()
+	r := g.run("H1")
+	_, s := g.d.last()
+	text, err := os.ReadFile(filepath.Join(s.workspace, filepath.FromSlash(r.File(PlanFile))))
+	if err != nil || string(text) != PlanOutline {
+		t.Fatalf("plan.md when the session starts = %q, %v", text, err)
+	}
+	if got := g.git.messages(); got[len(got)-1] != "run: plan outline" || r.Start != g.git.log[len(g.git.log)-1].sha {
+		t.Fatalf("the outline must be committed before Start: commits %q, start %s", got, r.Start)
+	}
+
+	g.finish(map[string]string{r.File(MapFile): "stats.go: Mean and Sum"})
+	g.tick()
+	if p := s.prompts[len(s.prompts)-1]; !strings.Contains(p, "without filling in the outline in "+r.File(PlanFile)) {
+		t.Fatalf("the session should be told once: %q", p)
+	}
+	g.finish(nil)
+	g.tick()
+	if r.Step != StepPlan || r.Attempt != 1 || !strings.Contains(g.log.String(), "did not fill in the outline in "+r.File(PlanFile)) {
+		t.Fatalf("run = %+v\nlog:\n%s", r, g.log.String())
+	}
+
+	// The retry starts from the same outline, with no second commit of it.
+	g.tick()
+	if n := strings.Count(strings.Join(g.git.history, "\n"), "run: plan outline"); n != 1 {
+		t.Errorf("the outline was committed %d times", n)
+	}
+	g.finish(map[string]string{r.File(PlanFile): "# Plan\n\n## Approach\nAdd Median beside Mean.\n"})
+	g.tick()
+	if r.Step == StepPlan {
+		t.Errorf("a filled-in plan should end the step: run = %+v\nlog:\n%s", r, g.log.String())
 	}
 }
 
