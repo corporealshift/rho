@@ -1039,9 +1039,9 @@ func (rn *Runner) produced(ctx context.Context, d Daemon, r *Run, goalMet bool) 
 		}
 	}
 
-	// A planning step writes its own file and nothing else. In a live run the
-	// verify session also wrote the feature and its tests, so the check passed
-	// before any work and task 1 found itself already done.
+	// A planning step writes its own file and the map, and nothing else. In a
+	// live run the verify session also wrote the feature and its tests, so the
+	// check passed before any work and task 1 found itself already done.
 	own := ownFile(r.Step)
 	if own != "" {
 		changed, err := rn.Git.Changed(ctx, r.Worktree, r.Start)
@@ -1054,13 +1054,13 @@ func (rn *Runner) produced(ctx context.Context, d Daemon, r *Run, goalMet bool) 
 		}
 		var other []string
 		for _, f := range append(changed, dirty...) {
-			if f != r.File(own) && !slices.Contains(other, f) {
+			if f != r.File(own) && f != r.File(MapFile) && !slices.Contains(other, f) {
 				other = append(other, f)
 			}
 		}
 		if len(other) > 0 {
-			o, _, err := rn.discard(ctx, r, fmt.Sprintf("the %s step may write only %s, and the session also changed %s",
-				r.Step, r.File(own), strings.Join(other, ", ")))
+			o, _, err := rn.discard(ctx, r, fmt.Sprintf("the %s step may write only %s and %s, and the session also changed %s",
+				r.Step, r.File(own), r.File(MapFile), strings.Join(other, ", ")))
 			return o, err
 		}
 		if mustRewrite(r) && !slices.Contains(changed, r.File(own)) && !slices.Contains(dirty, r.File(own)) {
@@ -1099,8 +1099,14 @@ func (rn *Runner) produced(ctx context.Context, d Daemon, r *Run, goalMet bool) 
 		if err != nil {
 			return Outcome{}, err
 		}
-		if slices.Contains(dirty, r.File(own)) {
-			if err := rn.Git.Commit(ctx, r.Worktree, "run: "+string(r.Step)+" (committed by the runner)", r.File(own)); err != nil {
+		var left []string
+		for _, f := range []string{r.File(own), r.File(MapFile)} {
+			if slices.Contains(dirty, f) {
+				left = append(left, f)
+			}
+		}
+		if len(left) > 0 {
+			if err := rn.Git.Commit(ctx, r.Worktree, "run: "+string(r.Step)+" (committed by the runner)", left...); err != nil {
 				return Outcome{}, err
 			}
 		}
