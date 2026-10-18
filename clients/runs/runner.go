@@ -484,6 +484,14 @@ func (rn *Runner) begin(ctx context.Context, d Daemon, r *Run) error {
 	if err != nil {
 		return err
 	}
+	// A plan session fills in an outline rather than writing the plan whole.
+	// It goes in before Start, so a session that leaves it as it is has not
+	// planned. After a re-plan it replaces the old plan.
+	if r.Step == StepPlan {
+		if err := rn.write(ctx, r, PlanFile, PlanOutline, "run: plan outline"); err != nil {
+			return err
+		}
+	}
 	if r.Start, err = rn.Git.Head(ctx, r.Worktree); err != nil {
 		return err
 	}
@@ -883,6 +891,9 @@ func (rn *Runner) missing(ctx context.Context, r *Run, goalMet bool) (string, er
 			if err != nil || done {
 				return "", err
 			}
+			if own == PlanFile && r.Replans == 0 {
+				return fmt.Sprintf("You ended your turn without filling in the outline in %s. Fill it in now, a section at a time, as the first message asked, and commit it.", r.File(own)), nil
+			}
 			return fmt.Sprintf("You ended your turn without rewriting %s. The old one could not be carried out; write it again now, as the first message asked, and commit it.", r.File(own)), nil
 		}
 		return "", nil
@@ -959,11 +970,12 @@ func (rn *Runner) found(ctx context.Context, r *Run, from Step, finding string) 
 }
 
 // mustRewrite reports whether a planning step has to change its file, not
-// just leave one there: after a re-plan the old plan and tasks are still on
-// the branch, and keeping them would repeat what could not be done.
+// just leave one there. The plan step always does: it starts from the
+// outline. After a re-plan the old tasks are still on the branch, and keeping
+// them would repeat what could not be done.
 func mustRewrite(r *Run) bool {
 	own := ownFile(r.Step)
-	return r.Replans > 0 && (own == PlanFile || own == TasksFile)
+	return own == PlanFile || (r.Replans > 0 && own == TasksFile)
 }
 
 // rewrote reports whether the session changed one of the run's files,
@@ -1064,7 +1076,11 @@ func (rn *Runner) produced(ctx context.Context, d Daemon, r *Run, goalMet bool) 
 			return o, err
 		}
 		if mustRewrite(r) && !slices.Contains(changed, r.File(own)) && !slices.Contains(dirty, r.File(own)) {
-			o, _, err := rn.discard(ctx, r, "the run is being planned again, and the session did not rewrite "+r.File(own))
+			why := "the run is being planned again, and the session did not rewrite " + r.File(own)
+			if own == PlanFile {
+				why = "the session did not fill in the outline in " + r.File(own)
+			}
+			o, _, err := rn.discard(ctx, r, why)
 			return o, err
 		}
 	}

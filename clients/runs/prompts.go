@@ -74,28 +74,54 @@ Write it to %s. Then start the run's map of the code, %s, for the steps that pla
 %s%s`, r.File(BriefFile), r.File(MapFile), transcript, rules(r), planningOnly(r, BriefFile))
 }
 
-// PlanPrompt asks for plan.md.
+// PlanOutline is what plan.md holds when a plan session starts: the runner
+// writes it, and the session fills it in a section at a time. Written whole
+// at the end, a plan ran to 29 KB of type designs and code, after an hour of
+// reading (docs/specs/2026-10-18-plan-outline-design.md).
+const PlanOutline = `# Plan
+
+## Approach
+<!-- One paragraph: how the brief will be met, and why that fits this codebase. -->
+
+## Files
+<!-- One line for each file to create or change, saying what changes in it. What a file already holds belongs in the map: point there. -->
+
+## Order
+<!-- A short numbered list. Each step leaves the build passing. -->
+
+## Testing
+<!-- One line for each behavior the tests must show, and the kind of test. Not test code: the verify step names the tests. -->
+
+## Risks
+<!-- One line for each thing that could go wrong or is uncertain, and what the work does about it. -->
+
+` + DecisionsHeading + `
+<!-- Fill this in first, from the brief alone. One short paragraph for each behavior the brief leaves open that someone using the result could notice. -->
+`
+
+// PlanPrompt asks for plan.md, filled in from the outline the runner wrote.
 func PlanPrompt(r Run) string {
-	return fmt.Sprintf(`Read the brief in %s, then plan the work.
+	return fmt.Sprintf(`Read the brief in %[1]s, then plan the work in %[2]s.
 
-Read as much of the repository as you need. Write the plan to %s. It says:
-- the approach, and why it fits this codebase;
-- the files and parts of the code involved;
-- the order the work should go in;
-- how the result will be tested;
-- anything risky or uncertain;
-- the decisions, in a section headed exactly "%s" at the end.
+%[2]s already holds the plan's outline: its headings, each with a note on what goes under it. Fill it in a section at a time, replacing each note with one edit as soon as you know what goes there. Do not draft the whole plan before writing the first section. A long session is summarized, and a summary keeps only what is in a file, so whatever you work out only in your thinking you may have to work out again.
 
-The decisions section has one entry for each behavior the brief leaves open that someone using the result could notice. Each entry gives the question, what the plan chooses, the alternative, and why the choice is what users would expect. Choices about how the code is written do not go there. If the brief settles every behavior the plan touches, say so in one line under the heading. The owner reads this section in the pull request, and changes a decision there if they disagree.
+Go in this order:
+1. "%[3]s", from the brief alone, before you read any code. One entry for each behavior the brief leaves open that someone using the result could notice: the question, what the plan chooses, the alternative, and why the choice is what users would expect, in a short paragraph. Choices about how the code is written do not go there. If the brief settles every behavior the plan touches, say so in one line. The owner reads this section in the pull request, and changes a decision there if they disagree. It stays the last section.
+2. Read the code the plan needs, adding to the map as you go (below).
+3. Approach, Files, Order, Testing and Risks, each as soon as you know it.
+4. Read the plan through once, correct what is wrong, and commit it, with the map, with the message "run: plan".
 
-%s
+Read in proportion to the change: only what the plan needs, and of a long file only the part you need (find it with grep -n, then read with an offset and a limit). The sessions that do the work read the code they change, so the plan does not need its details.
 
-%s
+Keep the plan to about two pages. Write no code, signatures or class designs: the work sessions write those. Where a section would only repeat the brief or the map, point to it instead.
 
-%s
-Plan exactly what the brief asks for, and nothing more. Commit it, with the map, with the message "run: plan".
-%s%s%s`, r.File(BriefFile), r.File(PlanFile), DecisionsHeading, expectation, draftInFile(r.File(PlanFile)), keepMap(r),
-		replanned(r, fmt.Sprintf("Work already committed on this branch stays: see it with `git log origin/%s..HEAD`, and plan only what remains. Rewrite %s; do not keep the old plan.", r.Base, r.File(PlanFile))),
+%[4]s
+
+%[5]s
+%[6]s
+Plan exactly what the brief asks for, and nothing more.
+%[7]s%[8]s`, r.File(BriefFile), r.File(PlanFile), DecisionsHeading, expectation, keepMap(r),
+		replanned(r, fmt.Sprintf("Work already committed on this branch stays: see it with `git log origin/%s..HEAD`, and plan only what remains. The old plan has been replaced by the outline, and is in the branch's history.", r.Base)),
 		rules(r), planningOnly(r, PlanFile))
 }
 
@@ -126,6 +152,8 @@ Write each task as a checkbox line, with indented lines under it saying what it 
 
 - [ ] Add the cache type
   A read-through cache in reader/cache.go with get and put. Tests: CacheTest.getReturnsWhatPutStored, CacheTest.getMissesAnUnknownKey.
+
+Keep each entry to a few lines like these: what the task covers, the files, and the tests it writes. Write no code, signatures or class designs: the session doing the task reads the plan and the map, and writes the code.
 
 %[8]s
 
@@ -248,7 +276,7 @@ const reviewer = "You are reviewing one step of an automated coding run in this 
 func PlanReviewPrompt(r Run) string {
 	return reviewer + fmt.Sprintf(`The brief is %[1]s. The plan, written by a smaller model, is %[2]s.
 
-Check that the plan does everything the brief asks, and nothing it does not, and that it will work in this codebase: read the code it names.
+Check that the plan does everything the brief asks, and nothing it does not, and that it will work in this codebase: read the code it names. Keep its sections and its size, about two pages with no code: the sessions doing the work write the code.
 
 %[5]s
 
