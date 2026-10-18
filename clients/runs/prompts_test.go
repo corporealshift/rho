@@ -62,6 +62,32 @@ func TestSessionPrompts(t *testing.T) {
 		t.Error("only the planning steps are told to draft in their file")
 	}
 
+	// The planning steps keep the map, and may write it; the brief starts it;
+	// the sessions that write code are pointed to it
+	// (docs/specs/2026-10-17-run-map-design.md).
+	m := r.File(MapFile)
+	for name, p := range map[string][2]string{
+		"plan":   {PlanPrompt(r), r.File(PlanFile)},
+		"tasks":  {TasksPrompt(r), r.File(TasksFile)},
+		"verify": {VerifyPrompt(r), verify},
+	} {
+		if !strings.Contains(p[0], m+" is the run's map of the code") || !strings.Contains(p[0], "Add to it as you read") {
+			t.Errorf("%s is not told to keep the map", name)
+		}
+		if !strings.Contains(p[0], "Write only "+p[1]+", and the run's map, "+m+".") {
+			t.Errorf("%s is not told it may write the map", name)
+		}
+	}
+	if b := BriefPrompt(r, "x"); !strings.Contains(b, "start the run's map of the code, "+m) || !strings.Contains(b, "Write only "+r.File(BriefFile)+", and the run's map, "+m+".") {
+		t.Error("the brief is not told to start the map")
+	}
+	ciFix, _ := CIFixPrompt(r, "lint failed")
+	for name, p := range map[string]string{"work": work, "fix": fix, "ci-fix": ciFix} {
+		if !strings.Contains(p, "the map of the code is "+m) {
+			t.Errorf("%s is not pointed to the map", name)
+		}
+	}
+
 	// The check is written before the tasks, from the brief and the plan.
 	// One named test per decision made the check ask for tests nobody planned
 	// (docs/specs/2026-10-09-verify-before-tasks-design.md).
