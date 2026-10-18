@@ -110,6 +110,10 @@ memory's curator uses it.
 The notes themselves are on disk, so a compaction cannot actually destroy one. The
 preserve strings are about the *summary* staying coherent with what the notes say.
 
+**Amended 2026-10-18** (2026-10-18-summary-keeps-reads): notes are no longer preserved.
+`BeforeRequest` sends them again after every summarize, and the copies filled summaries
+until they were cut off at their cap.
+
 ## 7. Sharing with the owner
 
 Notes are plain markdown files at `~/.rho/notes/ws/<key>/<slug>.md`, with frontmatter

@@ -198,23 +198,12 @@ func inView(s module.Session) (string, bool) {
 	return "", false
 }
 
-// BeforeCompaction hands the notes to the summariser as text it must preserve.
-//
-// The notes are on disk, so a compaction cannot destroy one. This is about the
-// summary staying coherent with what they say.
-func (m *Module) BeforeCompaction(_ context.Context, s module.Session, _ module.Range) []string {
-	if !m.enabled {
-		return nil
-	}
-	st := m.store(s)
-	if st == nil {
-		return nil
-	}
-	var out []string
-	for _, n := range st.List() {
-		out = append(out, fmt.Sprintf("Working note %q (written %s): %s", n.Name, writtenAt(n), n.Body))
-	}
-	return out
+// BeforeCompaction hands the summariser nothing: BeforeRequest puts the notes
+// back word for word on the next request. Copied into the summary as well,
+// other runs' notes filled a third of it and it was cut off at its cap
+// (docs/specs/2026-10-18-summary-keeps-reads-design.md).
+func (m *Module) BeforeCompaction(context.Context, module.Session, module.Range) []string {
+	return nil
 }
 
 // AfterCompaction re-injects nothing: BeforeRequest runs on the very next
