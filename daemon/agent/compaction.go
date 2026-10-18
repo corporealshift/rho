@@ -25,7 +25,9 @@ Keep, in this order:
 
 An earlier summary, when given, is replaced by yours: carry forward everything in it that still holds, and drop what is finished.
 
-Working notes among the facts to preserve are the agent's own, written at the time shown. Keep them verbatim. Where a message from the user later than a note contradicts it, say the note is out of date: the user's message wins. The same holds for anything else the agent wrote.
+Tool results are shortened in this transcript, but the agent saw each one whole. A file the agent read has been read: say so, and never list it as unread or not fully examined because its result is cut short here. Where the agent wrote down what it found in a file of its own, name that file rather than repeating it.
+
+Where a message from the user later than something the agent wrote contradicts it, say it is out of date: the user's message wins.
 
 Drop pleasantries, repeated tool output, and narration. Be specific: name files, commands and errors. Do not invent anything that is not in the conversation.
 
@@ -419,13 +421,28 @@ func renderForSummary(events []protocol.Event) string {
 			fmt.Fprintf(&b, "tool call %s(%s)\n", d.Tool, truncateText(string(d.Arguments), 400))
 		case protocol.EventToolResult:
 			d := protocol.MustData[protocol.ToolResultData](e)
-			fmt.Fprintf(&b, "tool result [%s]: %s\n\n", d.Status, truncateText(d.Content, 1200))
+			fmt.Fprintf(&b, "tool result [%s]: %s\n\n", d.Status, shortenResult(d.Content))
 		case protocol.EventCheck:
 			d := protocol.MustData[protocol.CheckData](e)
 			fmt.Fprintf(&b, "check %s: %s (%s)\n\n", d.Name, d.Status, d.Summary)
 		}
 	}
 	return b.String()
+}
+
+// resultShown is how much of each tool result the summariser sees. Whole
+// reads would make every summary a far longer prefill on a local model.
+const resultShown = 1200
+
+// shortenResult cuts a tool result for the summariser and says the agent saw
+// it whole. Marked only with the bytes left out, a cut read was summarised as
+// "not fully examined", and the next turn read the file again
+// (docs/specs/2026-10-18-summary-keeps-reads-design.md).
+func shortenResult(s string) string {
+	if len(s) <= resultShown {
+		return s
+	}
+	return s[:resultShown] + fmt.Sprintf(" …(shortened for this summary; the agent saw all %d bytes)", len(s))
 }
 
 func truncateText(s string, max int) string {

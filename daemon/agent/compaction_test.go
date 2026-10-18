@@ -575,3 +575,29 @@ func TestTheSummariserIsAskedAgainAfterTheTranscript(t *testing.T) {
 		t.Fatalf("summary: %q", got)
 	}
 }
+
+// A read cut short for the summariser must not be summarised as unread: told
+// only how many bytes were left out, it wrote "not fully examined", and the
+// next turn read the file again.
+func TestTheSummariserIsToldACutReadWasSeenWhole(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	got := renderForSummary(mklog(t,
+		protocol.EventSession, sess,
+		protocol.EventToolCall, protocol.ToolCallData{CallID: "c1", Tool: "read", Arguments: json.RawMessage(`{"path":"a.go"}`), Source: "model"},
+		protocol.EventToolResult, protocol.ToolResultData{CallID: "c1", Tool: "read", Content: long, Status: "ok"},
+		protocol.EventToolCall, protocol.ToolCallData{CallID: "c2", Tool: "read", Arguments: json.RawMessage(`{"path":"b.go"}`), Source: "model"},
+		protocol.EventToolResult, protocol.ToolResultData{CallID: "c2", Tool: "read", Content: "short", Status: "ok"},
+	))
+	if !strings.Contains(got, "the agent saw all 5000 bytes") || strings.Contains(got, "more bytes") {
+		t.Fatalf("a cut result must say the agent saw it whole:\n%s", got[len(got)-300:])
+	}
+	if strings.Count(got, "x") > resultShown+10 {
+		t.Fatalf("the result should still be cut for the summariser")
+	}
+	if !strings.Contains(got, "tool result [ok]: short\n") {
+		t.Fatalf("a short result is shown whole:\n%s", got)
+	}
+	if !strings.Contains(summarizePrompt, "never list it as unread") {
+		t.Fatal("the summary prompt must say a cut read has been read")
+	}
+}

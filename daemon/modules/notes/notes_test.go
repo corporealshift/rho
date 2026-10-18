@@ -370,26 +370,15 @@ func TestBadWritesAreInvalidArgs(t *testing.T) {
 	}
 }
 
-// A summarize squeezes everything into one pass. The notes are what the model
-// most needs to survive it, so the summariser is told to keep them.
-func TestCompactionIsToldToPreserveTheNotes(t *testing.T) {
+// The notes come back in their own block after a summary
+// (TestNotesAreSentAgainAfterASummary), so the summary does not carry them
+// too: the copies filled summaries until they were cut off.
+func TestCompactionIsToldToPreserveNothing(t *testing.T) {
 	m, s, _ := newModule(t, nil)
 	write(t, m, s, "refactor", "Y must be initialised before X calls it.")
 
-	preserve := m.BeforeCompaction(context.Background(), s, module.Range{})
-	if len(preserve) != 1 {
-		t.Fatalf("preserve = %v, want one entry", preserve)
-	}
-	if !strings.Contains(preserve[0], "Y must be initialised") {
-		t.Errorf("the body should be preserved, got %q", preserve[0])
-	}
-	if !strings.Contains(preserve[0], "refactor") {
-		t.Errorf("the name should be preserved, got %q", preserve[0])
-	}
-	// The summariser weighs a note against the person's later messages, so it
-	// has to know when the note was written.
-	if !strings.Contains(preserve[0], "(written 2026-09-18 12:00Z)") {
-		t.Errorf("the write time should be preserved, got %q", preserve[0])
+	if preserve := m.BeforeCompaction(context.Background(), s, module.Range{}); len(preserve) != 0 {
+		t.Fatalf("preserve = %v, want nothing", preserve)
 	}
 }
 
