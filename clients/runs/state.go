@@ -238,6 +238,8 @@ const (
 	// FindingsFile every claim Claude agreed with, for the planner.
 	ReplanFile   = "replan-request.md"
 	FindingsFile = "findings.md"
+	// MapFile is the run's notes on the code, kept by the planning steps.
+	MapFile = "map.md"
 )
 
 // RunsDir holds one state file per run.

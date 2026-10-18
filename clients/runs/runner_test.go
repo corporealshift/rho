@@ -1138,11 +1138,49 @@ func TestAPlanningStepMayWriteOnlyItsFile(t *testing.T) {
 	if r.Step != StepPlan || r.Attempt != 1 || len(g.git.resets) != 1 || g.git.resets[0] != start {
 		t.Fatalf("run = %+v, resets %q", r, g.git.resets)
 	}
-	if !strings.Contains(g.log.String(), "may write only "+r.File(PlanFile)+", and the session also changed stats.go") {
+	if !strings.Contains(g.log.String(), "may write only "+r.File(PlanFile)+" and "+r.File(MapFile)+", and the session also changed stats.go") {
 		t.Errorf("log:\n%s", g.log.String())
 	}
 	if p := g.d.sessions["S1"].prompts[0]; !strings.Contains(p, "Write only "+r.File(PlanFile)) {
 		t.Errorf("the plan prompt does not say so:\n%s", p)
+	}
+}
+
+// The map is every planning step's to keep (docs/specs/2026-10-17-run-map-design.md).
+func TestAPlanningStepMayAlsoWriteTheMap(t *testing.T) {
+	g := newRig(t)
+	g.ask("H1", "Add a Median function")
+	g.tick()
+	r := g.run("H1")
+	g.finish(map[string]string{r.File(PlanFile): "p", r.File(MapFile): "stats.go: Mean and Sum"})
+	g.tick()
+	if r.Step == StepPlan || len(g.git.resets) != 0 {
+		t.Fatalf("run = %+v, resets %q\nlog:\n%s", r, g.git.resets, g.log.String())
+	}
+}
+
+// A map left uncommitted goes in with the step's file, as the file itself does.
+func TestAMapLeftUncommittedIsCommittedByTheRunner(t *testing.T) {
+	g := newRig(t)
+	g.ask("H1", "Add a Median function")
+	g.tick()
+	r := g.run("H1")
+	_, s := g.d.last()
+	full := filepath.Join(s.workspace, filepath.FromSlash(r.File(MapFile)))
+	if err := os.WriteFile(full, []byte("stats.go: Mean and Sum"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g.git.dirty[r.File(MapFile)] = true
+	g.finish(map[string]string{r.File(PlanFile): "p"})
+	g.tick()
+	var got []string
+	for _, c := range g.git.log {
+		if c.msg == "run: plan (committed by the runner)" {
+			got = c.files
+		}
+	}
+	if !slices.Contains(got, r.File(MapFile)) || r.Step == StepPlan {
+		t.Errorf("runner's commit = %q, run = %+v\nlog:\n%s", got, r, g.log.String())
 	}
 }
 
