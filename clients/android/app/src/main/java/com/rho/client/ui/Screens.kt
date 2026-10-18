@@ -66,10 +66,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -78,6 +79,7 @@ import com.rho.client.data.SessionRow
 import com.rho.client.protocol.Task
 import com.rho.client.settings.Settings
 import com.rho.client.ui.markdown.MarkdownText
+import com.rho.client.ui.theme.Mark
 import com.rho.client.ui.theme.Mode
 import com.rho.client.ui.theme.RhoTheme
 import com.rho.client.ui.theme.Scheme
@@ -212,7 +214,13 @@ fun SessionListScreen(
                     containerColor = RhoTheme.colors.background,
                     titleContentColor = RhoTheme.colors.ink,
                 ),
-                title = { Text("Rho", fontWeight = FontWeight.SemiBold) },
+                title = {
+                    Mark(
+                        mountain = RhoTheme.colors.ink,
+                        ring = RhoTheme.colors.accent,
+                        modifier = Modifier.size(width = 40.dp, height = 20.dp).semantics { contentDescription = "Rho" },
+                    )
+                },
                 actions = {
                     Text(
                         connectionLabel(connection),
