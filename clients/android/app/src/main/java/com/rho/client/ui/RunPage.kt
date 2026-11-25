@@ -108,34 +108,6 @@ fun stepLine(s: RunStatus, now: Long): String {
     return parts.joinToString(" · ")
 }
 
-/** One task's share of the work. */
-data class TaskBar(val task: Int, val title: String, val turns: Int, val tries: Int)
-
-/**
- * Turns per task, from the work sessions in the timeline and each session's
- * turns in the tree. A task's tries are its work sessions, the current one
- * included.
- */
-fun turnsPerTask(s: RunStatus, tree: TreeStats?): List<TaskBar> {
-    val turnsOf = tree?.members?.associate { it.sessionId to it.turns }.orEmpty()
-    val sessions = linkedMapOf<Int, MutableList<String>>()
-    for (h in s.history) {
-        if (h.step == "work" && h.task > 0) sessions.getOrPut(h.task) { mutableListOf() } += h.session
-    }
-    if (s.step == "work" && s.task > 0 && s.session.isNotBlank()) {
-        val list = sessions.getOrPut(s.task) { mutableListOf() }
-        if (s.session !in list) list += s.session
-    }
-    return sessions.toSortedMap().map { (task, ids) ->
-        TaskBar(
-            task = task,
-            title = s.tasks.getOrNull(task - 1).orEmpty(),
-            turns = ids.sumOf { turnsOf[it] ?: 0 },
-            tries = ids.size,
-        )
-    }
-}
-
 /**
  * What the page says of a gate parked because Claude is not answering (a
  * limit, an outage), or null when it is not
@@ -145,7 +117,7 @@ fun parkedLine(parked: String): String? = if (parked.isBlank()) null else "Waiti
 
 /** How many times Claude was consulted at the run's gates, from the timeline. */
 fun claudeGates(s: RunStatus): Int =
-    s.history.count { it.step in setOf("plan-review", "verify-review", "revise", "final-review") }
+    s.history.count { it.step in CLAUDE_GATES }
 
 /** What a run's page shows of the step session under way. */
 data class LiveStep(
@@ -327,50 +299,10 @@ private fun RunStats(s: RunStatus, load: TreeLoad) {
             }
         }
         Text(
-            "Claude reviewed ${claudeGates(s)}× · fixes ${s.fixes} · verify revisions ${s.revisions} · CI fixes ${s.ciFixes}",
+            "Claude reviewed ${claudeGates(s)}× · CI fixes ${s.ciFixes}",
             style = MaterialTheme.typography.bodySmall,
             color = c.muted,
         )
-        val bars = turnsPerTask(s, tree)
-        if (bars.isNotEmpty()) TaskBars(bars)
-    }
-}
-
-/** Turns per task as bars, with the tries beside them. */
-@Composable
-private fun TaskBars(bars: List<TaskBar>) {
-    val c = RhoTheme.colors
-    val top = bars.maxOf { it.turns }.coerceAtLeast(1)
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Heading("Turns per task", "Tries beyond the first are marked.")
-        bars.forEach { b ->
-            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "${b.task}. ${b.title}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = c.ink,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.width(120.dp),
-                )
-                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                    val frac = 0.6f * b.turns / top
-                    if (frac > 0f) {
-                        Box(
-                            Modifier.weight(frac).height(12.dp)
-                                .background(c.chart, RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)),
-                        )
-                    }
-                    Text(
-                        " ${b.turns}" + if (b.tries > 1) "  ·  ${b.tries} tries" else "",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (b.tries > 1) c.danger else c.muted,
-                        maxLines = 1,
-                        modifier = Modifier.weight(1f - frac),
-                    )
-                }
-            }
-        }
     }
 }
 

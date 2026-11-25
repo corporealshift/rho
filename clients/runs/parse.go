@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 )
 
 // Task is one checkbox in tasks.md.
@@ -59,18 +57,6 @@ func NextTask(tasks []Task) (int, int) {
 	return next, left
 }
 
-// TickTask marks task i done in tasks.md.
-func TickTask(md string, i int) string {
-	tasks := ParseTasks(md)
-	if i < 0 || i >= len(tasks) {
-		return md
-	}
-	lines := strings.Split(strings.ReplaceAll(md, "\r\n", "\n"), "\n")
-	m := checkbox.FindStringSubmatch(lines[tasks[i].line])
-	lines[tasks[i].line] = m[1] + "[x]" + m[3] + m[4]
-	return strings.Join(lines, "\n")
-}
-
 // Blocker is one thing the final review says must be fixed before the PR.
 type Blocker struct {
 	Title  string `json:"title"`
@@ -91,64 +77,6 @@ func AppendTasks(md string, blockers []Blocker) string {
 		}
 	}
 	return b.String()
-}
-
-// Begin and End mark a whole file in one of Claude's answers. Markers rather
-// than a code fence, because a plan is markdown and carries fences of its own.
-func Begin(name string) string { return "=====BEGIN " + name + "=====" }
-func End(name string) string   { return "=====END " + name + "=====" }
-
-// ParseRewrite reads an answer that either replaces a file or says it may
-// stand. text and changed are the replacement; ok is false when the answer
-// does neither, which is not an answer.
-func ParseRewrite(answer, name, sentinel string) (text string, changed, ok bool) {
-	answer = strings.ReplaceAll(answer, "\r\n", "\n")
-	if i := strings.LastIndex(answer, Begin(name)); i >= 0 {
-		rest := answer[i+len(Begin(name)):]
-		if j := strings.Index(rest, End(name)); j >= 0 {
-			return strings.Trim(rest[:j], "\n") + "\n", true, true
-		}
-	}
-	for _, l := range strings.Split(answer, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(strings.Trim(l, "*_`")), sentinel) {
-			return "", false, true
-		}
-	}
-	return "", false, false
-}
-
-// Refusal is what Claude said after REFUSED, to pass to the next fix.
-func Refusal(answer string) string {
-	_, after, found := strings.Cut(answer, "REFUSED")
-	if !found {
-		return ""
-	}
-	return strings.TrimSpace(strings.TrimLeft(after, ":.-— \n"))
-}
-
-// ParseReplan reads Claude's verdict on a claim that the plan cannot work:
-// the first line opening with REPLAN or REFUSED, and what follows it. A
-// REPLAN with nothing after it is no answer, since the planner needs the
-// finding.
-func ParseReplan(answer string) (finding, advice string, ok bool) {
-	lines := strings.Split(strings.ReplaceAll(answer, "\r\n", "\n"), "\n")
-	for i, l := range lines {
-		word := strings.TrimSpace(strings.Trim(strings.TrimSpace(l), "*_`#"))
-		for _, verdict := range []string{"REPLAN", "REFUSED"} {
-			rest, found := strings.CutPrefix(word, verdict)
-			// REPLANNING is a word, not the verdict.
-			if r, _ := utf8.DecodeRuneInString(rest); !found || unicode.IsLetter(r) || unicode.IsDigit(r) {
-				continue
-			}
-			rest = strings.Trim(rest, "*_`")
-			text := strings.TrimSpace(strings.TrimLeft(rest+"\n"+strings.Join(lines[i+1:], "\n"), ":.-— \n"))
-			if verdict == "REFUSED" {
-				return "", text, true
-			}
-			return text, "", text != ""
-		}
-	}
-	return "", "", false
 }
 
 var jsonBlock = regexp.MustCompile("(?s)```json[ \t]*\r?\n(.*?)\r?\n[ \t]*```")
@@ -231,28 +159,13 @@ func DecisionsSection(plan string) (text string, found bool) {
 	return strings.TrimSpace(strings.Join(lines[start:end], "\n")), true
 }
 
-// keepDecisions puts the plan's decisions back when a review's rewrite left
-// the section out. The runner never judges the entries; it only keeps them
-// from disappearing before the owner sees them.
-func keepDecisions(plan, rewrite string) string {
-	section, _ := DecisionsSection(plan)
-	if section == "" {
-		return rewrite
-	}
-	if _, has := DecisionsSection(rewrite); has {
-		return rewrite
-	}
-	return strings.TrimRight(rewrite, "\n") + "\n\n" + DecisionsHeading +
-		"\n\n_The review's rewrite left this section out; these are the plan's decisions._\n\n" + section + "\n"
-}
-
 // maxDecisions is how much of the decisions section a pull request carries.
 // GitHub refuses a body over 65,536 characters.
 const maxDecisions = 20000
 
 // decisionsForPR is the pull request's account of what the run chose where
 // the brief left a behavior open, from the plan at planPath.
-func decisionsForPR(plan, planPath, verifyPath string) string {
+func decisionsForPR(plan, planPath string) string {
 	section, _ := DecisionsSection(plan)
 	var b strings.Builder
 	b.WriteString("\n## Decisions this run made\n\n")
@@ -267,6 +180,6 @@ func decisionsForPR(plan, planPath, verifyPath string) string {
 		}
 		section = strings.ToValidUTF8(cut, "") + fmt.Sprintf("\n\n_Cut here; the rest is in `%s`._", planPath)
 	}
-	fmt.Fprintf(&b, "%s\n\nWhere `%s` tests one, the test's comment names it. To change one, say so in a comment on this PR.\n", section, verifyPath)
+	fmt.Fprintf(&b, "%s\n\nTo change one, say so in a comment on this PR.\n", section)
 	return b.String()
 }

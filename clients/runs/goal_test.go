@@ -80,7 +80,7 @@ func aGoal() Goal {
 		Round: 2, RoundsFrom: 1, Failures: 1,
 		Briefs: []GoalBrief{
 			{Title: "Queue", Brief: "Add a queue.", Round: 1, State: BriefDone, Run: "R1", PRURL: "https://github.com/kyle/x/pull/3", Notes: []string{"consider batching"}},
-			{Title: "Replay", Brief: "Replay it.", Round: 2, State: BriefFailed, Run: "R2", FailedAt: StepFix, Why: "verify.sh still fails after 10 fixes"},
+			{Title: "Replay", Brief: "Replay it.", Round: 2, State: BriefFailed, Run: "R2", FailedAt: StepCIFix, Why: "CI still fails after 5 fixes"},
 			{Title: "UI", Brief: "Show it.", Round: 2, State: BriefDropped},
 		},
 		Verdicts: []Verdict{{Round: 1, Reason: "nothing replays the queue"}},
@@ -104,7 +104,7 @@ func TestCheckPrompt(t *testing.T) {
 		"Add offline sync", "edits made offline reach the daemon", "rho/goal-offline-sync-g1", "- sync.go",
 		"### Round 1", "**Queue**: done, merged from https://github.com/kyle/x/pull/3", "review note: consider batching",
 		"The check said it was not met: nothing replays the queue",
-		"**Replay**: the run failed at its fix step: verify.sh still fails after 10 fixes",
+		"**Replay**: the run failed at its ci-fix step: CI still fails after 5 fixes",
 		"**UI**: not started", "gofmt found sync.go", "Do not give the same brief again",
 	} {
 		if !strings.Contains(p, s) {

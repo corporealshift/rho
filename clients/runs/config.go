@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"time"
 
 	"github.com/corporealshift/rho/clients/github"
@@ -30,28 +29,18 @@ type Config struct {
 	MaxJobs int             `json:"max_jobs"`
 	// Label goes on every PR a run opens, so the comments job answers
 	// review comments on it.
-	Label         string          `json:"label"`
-	VerifyTimeout github.Duration `json:"verify_timeout"`
-	Claude        ClaudeConfig    `json:"claude"`
-	// PlanTurns caps brief, plan, tasks and verify sessions' turns, and
-	// WorkTurns caps work, fix and ci-fix sessions'. Zero, the default, is no
-	// cap: caps of 50 and 100 failed a run whose sessions were still working.
-	PlanTurns int `json:"plan_turns"`
-	WorkTurns int `json:"work_turns"`
-	// ReflectTurns caps the reflection a run ends with. Default
-	// DefaultReflectTurns: it reads one digest and saves a few memories.
-	ReflectTurns int `json:"reflect_turns"`
+	Label  string       `json:"label"`
+	Claude ClaudeConfig `json:"claude"`
+	// Turns caps the run's session's turns, over the whole run. Zero, the
+	// default, is no cap.
+	Turns int `json:"turns"`
 	// GoalRounds is how many rounds of runs a goal gets before it stops and
 	// waits for Kyle. Default 5.
 	GoalRounds int `json:"goal_rounds"`
-	// Effort is each step's effort, for a session whose home has none. A step
-	// not listed is unset, so the server decides
-	// (docs/specs/2026-10-16-session-effort-design.md).
-	Effort map[Step]string `json:"effort"`
+	// Effort is the run's session's effort, when its home has none. Empty
+	// leaves it to the server (docs/specs/2026-10-16-session-effort-design.md).
+	Effort string `json:"effort"`
 }
-
-// sessionSteps are the steps that make a session, and so can have an effort.
-var sessionSteps = []Step{StepBrief, StepPlan, StepTasks, StepVerify, StepWork, StepFix, StepCIFix, StepReflect}
 
 // ConfigPath is where LoadConfig looks.
 func ConfigPath(root string) string { return filepath.Join(root, "runner", "config.json") }
@@ -86,39 +75,24 @@ func (c *Config) withDefaults() {
 	if c.Label == "" {
 		c.Label = "rho"
 	}
-	if c.VerifyTimeout <= 0 {
-		c.VerifyTimeout = github.Duration(30 * time.Minute)
-	}
 	if c.Claude.Timeout <= 0 {
 		c.Claude.Timeout = github.Duration(15 * time.Minute)
 	}
-	if c.PlanTurns < 0 {
-		c.PlanTurns = 0
-	}
-	if c.WorkTurns < 0 {
-		c.WorkTurns = 0
+	if c.Turns < 0 {
+		c.Turns = 0
 	}
 	if c.GoalRounds < 1 {
 		c.GoalRounds = 5
 	}
-	if c.ReflectTurns < 1 {
-		c.ReflectTurns = DefaultReflectTurns
-	}
 }
 
-// validEffort refuses an effort map that could never mean what it says: a
-// step that makes no session, or a level the daemon would refuse.
+// validEffort refuses an effort the daemon would refuse.
 func (c Config) validEffort() error {
-	for step, level := range c.Effort {
-		if !slices.Contains(sessionSteps, step) {
-			return fmt.Errorf("effort: %q is not a step that makes a session", step)
-		}
-		if err := protocol.ValidEffort(level); err != nil {
-			return fmt.Errorf("effort.%s: %w", step, err)
-		}
+	if c.Effort == "" {
+		return nil
+	}
+	if err := protocol.ValidEffort(c.Effort); err != nil {
+		return fmt.Errorf("effort: %w", err)
 	}
 	return nil
 }
-
-// DefaultReflectTurns is the reflection's turn cap when none is set.
-const DefaultReflectTurns = 30

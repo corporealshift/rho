@@ -37,23 +37,21 @@ class StatusTest {
         val run = (parsed as? ParsedStatus.Run)?.status ?: error("not a run: $parsed")
         assertEquals("In-Flight notes: data, state and actions (no UI)", run.title)
         assertEquals("work", run.step)
-        assertEquals(2, run.task)
-        assertEquals(listOf("Notes in Room", "Notes in state", "Actions"), run.tasks)
-        assertEquals(1, run.attempt)
+        assertEquals(3, run.task)
+        assertEquals(listOf("Notes in Room", "Notes in state", "Notes survive a restart"), run.tasks)
+        assertEquals(0, run.attempt)
         assertEquals("01M4PFQCAXFW19C4PHD50DSQSM", run.session)
         assertEquals("01M498J1N9D785RFV6AZBRZN7G", run.goal)
-        assertEquals(41, run.pr.number)
-        assertEquals(1, run.fixes)
-        assertEquals(1, run.revisions)
+        assertEquals(0, run.pr.number)
+        assertEquals(0, run.ciFixes)
         assertTrue(run.since.isNotEmpty() && run.started.isNotEmpty())
-        assertEquals(8, run.history.size)
-        val failed = run.history[5]
+        assertEquals(4, run.history.size)
+        val failed = run.history[1]
         assertEquals("work", failed.step)
-        assertEquals(1, failed.task)
         assertEquals(false, failed.ok)
         assertTrue(failed.why.endsWith("…"))
-        assertEquals("01M4P8ENR4XCTQT7HMWDVSCWG8", run.history[1].session)
-        assertEquals("asked for a revision of verify.sh", run.history[4].result)
+        assertEquals("01M4P8ENR4XCTQT7HMWDVSCWG8", failed.session)
+        assertEquals("1 blockers", run.history[3].result)
         assertTrue(run.brief.startsWith("# In-Flight notes"))
     }
 
@@ -61,7 +59,7 @@ class StatusTest {
     fun `a run waiting for Claude says why`() {
         val parsed = parseStatus(fixture("run", "parked.json"))
         val run = (parsed as? ParsedStatus.Run)?.status ?: error("not a run: $parsed")
-        assertEquals("plan-review", run.step)
+        assertEquals("final-review", run.step)
         assertEquals("You've hit your weekly limit · resets 2pm", run.parked)
         val fresh = parseStatus(fixture("run", "run.json")) as ParsedStatus.Run
         assertEquals("", fresh.status.parked)

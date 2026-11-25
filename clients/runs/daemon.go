@@ -102,6 +102,10 @@ func (c Client) SetGoal(ctx context.Context, id, condition string) error {
 		map[string]any{"session_id": id, "condition": condition}, nil)
 }
 
+func (c Client) ClearGoal(ctx context.Context, id string) error {
+	return c.C.CallInto(ctx, "rho.session.clear_goal", map[string]any{"session_id": id}, nil)
+}
+
 func (c Client) Create(ctx context.Context, workspace, parent string, maxTurns int, set Settings) (string, error) {
 	var out struct {
 		SessionID string `json:"session_id"`
@@ -114,14 +118,13 @@ func (c Client) Create(ctx context.Context, workspace, parent string, maxTurns i
 	return out.SessionID, err
 }
 
-// stepOptions are a step session's options.
+// stepOptions are the run's session's options.
 func stepOptions(parent string, set Settings) map[string]any {
-	// guard:no-push: a step session commits, and the runner pushes and posts
-	// once the work is checked.
-	// unattended: nobody watches a step, so it is offered no tool that needs
+	// guard:no-push: the session commits, and the runner pushes and posts
+	// once the work is reviewed.
+	// unattended: nobody watches a run, so it is offered no tool that needs
 	// a person.
-	// memory:no-curator: a step is one try of one task, and may be thrown
-	// away; the run reflects as a whole when it ends.
+	// memory:no-curator: the run reflects as a whole when it ends.
 	opts := map[string]any{"permission_mode": string(protocol.PermissionAuto), "parent": parent,
 		"labels": []string{NoPushLabel, protocol.LabelUnattended, NoCuratorLabel}}
 	set.into(opts)

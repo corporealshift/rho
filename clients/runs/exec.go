@@ -289,38 +289,6 @@ func firstLines(s string, n int) string {
 	return strings.Join(ls, "\n")
 }
 
-// Bash runs the check with bash.
-type Bash struct{}
-
-// maxCheckOutput is how much of a check's output is kept, from the end.
-const maxCheckOutput = 20000
-
-func (Bash) Verify(ctx context.Context, dir, script string, timeout time.Duration) (bool, string, error) {
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := exec.CommandContext(cctx, "bash", script)
-	cmd.Dir = dir
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	cmd.WaitDelay = 5 * time.Second
-	err := cmd.Run()
-	text := out.String()
-	if len(text) > maxCheckOutput {
-		text = "(earlier output cut)\n" + text[len(text)-maxCheckOutput:]
-	}
-	if cctx.Err() == context.DeadlineExceeded {
-		return false, text + fmt.Sprintf("\n(the check was stopped after %s)", timeout), nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return false, text, nil
-	}
-	if err != nil {
-		return false, text, fmt.Errorf("running %s: %w", script, err)
-	}
-	return true, text, nil
-}
-
 // PRChecks is a PR's state (OPEN, MERGED or CLOSED) and its checks. It reads
 // them with gh pr view, which, unlike gh pr checks, does not exit non-zero
 // while a check is pending or failing.
@@ -359,6 +327,9 @@ func (g GHCLI) PRChecks(ctx context.Context, dir string, n int) (string, []Check
 	}
 	return v.State, checks, nil
 }
+
+// maxCheckOutput is how much of a failed CI log is kept, from the end.
+const maxCheckOutput = 20000
 
 // FailedLog is the end of the failed steps' output of an Actions run.
 func (g GHCLI) FailedLog(ctx context.Context, dir, runID string) (string, error) {

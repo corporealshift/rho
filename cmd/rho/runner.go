@@ -42,7 +42,6 @@ func cmdRunner(args []string, stdout, stderr io.Writer) int {
 		Git:    runs.GitCLI{Run: github.ExecRunner},
 		GH:     runs.GHCLI{Run: github.ExecRunner},
 		Claude: runs.ClaudeCLI{Path: cfg.Claude.Path, Model: cfg.Claude.Model, Timeout: time.Duration(cfg.Claude.Timeout)},
-		Shell:  runs.Bash{},
 		Now:    time.Now,
 		Log:    log,
 	}

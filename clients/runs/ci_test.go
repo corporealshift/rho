@@ -93,12 +93,12 @@ func TestFailedLog(t *testing.T) {
 func TestCIFixPrompt(t *testing.T) {
 	r := Run{Slug: "x-1234"}
 	p, goal := CIFixPrompt(r, "### lint\n\ngofmt -l found stats.go")
-	for _, s := range []string{"### lint", "gofmt -l found stats.go", "CI may check things", r.File(RevisionFile), "Never create, edit, rename or delete " + r.File(VerifyFile)} {
+	for _, s := range []string{"### lint", "gofmt -l found stats.go", "CI may check things", "not the work's fault", "the runner pushes it"} {
 		if !strings.Contains(p, s) {
 			t.Errorf("prompt lacks %q", s)
 		}
 	}
-	if !strings.Contains(goal, "CI failures") || !strings.Contains(goal, r.File(VerifyFile)+" is untouched") {
+	if !strings.Contains(goal, "CI failures") || !strings.Contains(goal, "build and tests pass") {
 		t.Errorf("goal = %q", goal)
 	}
 }

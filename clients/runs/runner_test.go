@@ -40,8 +40,11 @@ type fakeSession struct {
 	// log is the session's messages: a user one per prompt, an assistant
 	// one per finish.
 	log []protocol.Event
-	// met is the session's goal judged met.
-	met bool
+	// met is the session's goal judged met; goalActive whether its goal
+	// still drives it, and cleared how many times one was cleared.
+	met        bool
+	goalActive bool
+	cleared    int
 }
 
 func (s *fakeSession) say(role, text string) {
@@ -109,7 +112,17 @@ func (d *fakeDaemon) SetGoal(_ context.Context, id, condition string) error {
 		// A goal on the home starts it working in the checkout.
 		return errors.New("a goal was set on a run's home")
 	}
-	d.sessions[id].goals = append(d.sessions[id].goals, condition)
+	s := d.sessions[id]
+	s.goals, s.goalActive = append(s.goals, condition), true
+	return nil
+}
+
+func (d *fakeDaemon) ClearGoal(_ context.Context, id string) error {
+	s := d.sessions[id]
+	if !s.goalActive {
+		return errors.New("rho_invalid_transition: no goal is active")
+	}
+	s.goalActive, s.cleared = false, s.cleared+1
 	return nil
 }
 
@@ -165,8 +178,11 @@ func (d *fakeDaemon) SendPrompt(_ context.Context, id, text string) error {
 func (d *fakeDaemon) State(_ context.Context, id string) (protocol.State, error) {
 	s := d.sessions[id]
 	st := protocol.State{State: s.state}
-	if s.met {
-		st.Goal = &protocol.GoalData{Condition: s.goals[0], State: "met"}
+	switch {
+	case s.met:
+		st.Goal = &protocol.GoalData{Condition: s.goals[len(s.goals)-1], State: "met"}
+	case s.goalActive:
+		st.Goal = &protocol.GoalData{Condition: s.goals[len(s.goals)-1], State: "unmet"}
 	}
 	return st, nil
 }
@@ -267,7 +283,7 @@ func (g *fakeGit) ResetHard(_ context.Context, _, sha string) error {
 			g.log = g.log[:i+1]
 		}
 	}
-	g.dirty = nil
+	g.dirty = map[string]bool{}
 	return g.cleanErr
 }
 
@@ -328,20 +344,14 @@ func (c *fakeClaude) Available() bool { return !c.missing }
 
 func kindOf(prompt string) string {
 	switch {
-	case strings.Contains(prompt, "says the plan cannot be carried out"):
-		return "replan"
 	case strings.Contains(prompt, "break it into briefs"):
 		return "breakdown"
 	case strings.Contains(prompt, "judge whether the goal is met"):
 		return "check"
 	case strings.Contains(prompt, "Report only blockers"):
 		return "final"
-	case strings.Contains(prompt, "Decide who is right"):
-		return "revise"
-	case strings.Contains(prompt, "defines done for the whole run"):
-		return "verify"
 	default:
-		return "plan"
+		return "other"
 	}
 }
 
@@ -363,35 +373,12 @@ func (c *fakeClaude) Ask(_ context.Context, _, prompt string) (string, error) {
 		return q[0], nil
 	}
 	return map[string]string{
-		"plan":   "NO CHANGES",
-		"verify": "APPROVED",
-		"revise": "REFUSED: the check is right.",
-		"replan": "REFUSED\nThe plan can work.",
-		"final":  "```json\n{\"blockers\":[],\"notes\":[\"consider generics\"]}\n```",
+		"final": "```json\n{\"blockers\":[],\"notes\":[\"consider generics\"]}\n```",
 		"breakdown": "```json\n{\"done_when\":[\"stats has Median and Mode\"],\"briefs\":[" +
 			"{\"title\":\"Median\",\"brief\":\"Add a Median function to stats.\"}," +
 			"{\"title\":\"Mode\",\"brief\":\"Add a Mode function to stats.\"}]}\n```",
 		"check": "```json\n{\"met\":true,\"reason\":\"both are there, tested\"}\n```",
 	}[k], nil
-}
-
-type fakeShell struct {
-	// results are taken in order; an empty queue passes.
-	results []bool
-	runs    int
-}
-
-func (s *fakeShell) Verify(context.Context, string, string, time.Duration) (bool, string, error) {
-	s.runs++
-	if len(s.results) == 0 {
-		return true, "ok", nil
-	}
-	r := s.results[0]
-	s.results = s.results[1:]
-	if r {
-		return true, "ok", nil
-	}
-	return false, "FAIL TestMedian: got 2, want 2.5", nil
 }
 
 type poll struct {
@@ -481,7 +468,6 @@ type rig struct {
 	d      *fakeDaemon
 	git    *fakeGit
 	claude *fakeClaude
-	shell  *fakeShell
 	gh     *fakeGH
 	log    bytes.Buffer
 	now    time.Time
@@ -492,14 +478,14 @@ type rig struct {
 func newRig(t *testing.T) *rig {
 	t.Helper()
 	g := &rig{t: t, d: newFakeDaemon(), git: &fakeGit{dirty: map[string]bool{}}, claude: &fakeClaude{answers: map[string][]string{}},
-		shell: &fakeShell{}, gh: &fakeGH{}, now: time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)}
+		gh: &fakeGH{}, now: time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)}
 	g.rn = g.runner(t.TempDir())
 	return g
 }
 
 func (g *rig) runner(root string) *Runner {
 	cfg, _ := LoadConfig(root)
-	return &Runner{Cfg: cfg, Root: root, Git: g.git, GH: g.gh, Claude: g.claude, Shell: g.shell,
+	return &Runner{Cfg: cfg, Root: root, Git: g.git, GH: g.gh, Claude: g.claude,
 		Now: func() time.Time { return g.now }, Log: &g.log}
 }
 
@@ -577,91 +563,88 @@ func (g *rig) finish(files map[string]string) {
 	s.state = protocol.StateIdle
 }
 
-func (g *rig) file(r *Run, name string) string { return r.File(name) }
+const (
+	twoTasks  = "- [ ] Add Median\n  In stats.go.\n- [ ] Test Median\n  In stats_test.go.\n"
+	doneTasks = "- [x] Add Median\n  In stats.go.\n- [x] Test Median\n  In stats_test.go.\n"
+)
 
-const twoTasks = "- [ ] Add Median\n  In stats.go.\n- [ ] Test Median\n  In stats_test.go.\n"
-
-// planned takes a run with a text brief as far as its first work session.
-func (g *rig) planned(id string) *Run {
-	g.t.Helper()
-	return g.plannedWith(id, "# Plan\n")
-}
-
-// plannedWith is planned, with the plan session writing plan.
-func (g *rig) plannedWith(id, plan string) *Run {
+// started takes a run with a text brief as far as its session's first prompt.
+func (g *rig) started(id string) *Run {
 	g.t.Helper()
 	g.ask(id, "Add a Median function to stats")
 	g.tick()
 	r := g.run(id)
-	g.finish(map[string]string{r.File(PlanFile): plan})
+	if r.Step != StepWork || r.Session == "" || !r.Prompted {
+		g.t.Fatalf("after starting, the run is %+v", r)
+	}
+	return r
+}
+
+// doAll has the session plan, write its tasks, do them all, and end its turn.
+func (g *rig) doAll(r *Run, plan string) {
+	g.t.Helper()
+	g.finish(map[string]string{r.File(PlanFile): plan, r.File(TasksFile): doneTasks, "stats.go": "x"})
+}
+
+// opened takes a run to its open PR, with whatever CI polls the test queued.
+func (g *rig) opened(id string) *Run {
+	g.t.Helper()
+	r := g.started(id)
+	g.doAll(r, "# Plan\n")
 	g.tick()
-	g.finish(map[string]string{r.File(VerifyFile): "go test ./...\n"})
-	g.tick()
-	g.finish(map[string]string{r.File(TasksFile): twoTasks})
-	g.tick()
-	if r.Step != StepWork {
-		g.t.Fatalf("after planning the run is at %q", r.Step)
+	if r.PR == 0 {
+		g.t.Fatalf("no PR: %+v\nlog:\n%s", r, g.log.String())
 	}
 	return r
 }
 
 // ---- tests -------------------------------------------------------------
 
+// One session does the whole run: it is prompted once for the work, and once
+// more for the reflection, and stopped when the run ends.
 func TestAWholeRun(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false} // verify-review's run before any work fails, as it should
-	r := g.planned("H1")
-
-	g.finish(map[string]string{"stats.go": "package stats\n"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "package stats\n"})
+	r := g.started("H1")
+	g.doAll(r, "# Plan\n")
 	g.tick()
 
 	if r.Step != StepDone || r.PRURL == "" {
 		t.Fatalf("run ended at %q (%s)\nlog:\n%s", r.Step, r.Why, g.log.String())
 	}
-	want := []string{
-		"run: brief", "run: plan outline", "session: " + r.File(PlanFile), "session: " + r.File(VerifyFile), "session: " + r.File(TasksFile),
-		"session: stats.go", "run: task 1 done", "session: stats_test.go", "run: task 2 done",
-	}
+	want := []string{"run: brief", "session: " + strings.Join([]string{r.File(PlanFile), r.File(TasksFile), "stats.go"}, ",")}
+	slices.Sort(want[1:])
 	if got := g.git.messages(); !slices.Equal(got, want) {
 		t.Errorf("commits =\n %q\nwant\n %q", got, want)
 	}
-	for id, s := range g.d.sessions {
-		if s.parent != "H1" || s.workspace != r.Worktree {
-			t.Errorf("session %s: parent %q, workspace %q", id, s.parent, s.workspace)
-		}
+	if len(g.d.order) != 1 {
+		t.Fatalf("sessions = %d, want one for the whole run", len(g.d.order))
 	}
-	// plan, verify, tasks, then two work sessions with goals, then the
-	// reflection.
-	if len(g.d.order) != 6 {
-		t.Fatalf("sessions = %d", len(g.d.order))
+	s := g.d.sessions["S1"]
+	if s.parent != "H1" || s.workspace != r.Worktree || s.turns != 0 {
+		t.Errorf("session: %+v", s)
 	}
-	if s := g.d.sessions["S6"]; s.turns != DefaultReflectTurns || !strings.Contains(s.prompts[0], "How the run went") {
-		t.Errorf("reflection session: %+v", s)
+	if len(s.prompts) != 2 || !strings.Contains(s.prompts[0], "1. **Plan.**") || !strings.Contains(s.prompts[1], "How the run went") {
+		t.Errorf("prompts = %q", s.prompts)
 	}
-	if s := g.d.sessions["S1"]; s.turns != 0 || len(s.goals) != 0 || !strings.Contains(s.prompts[0], r.File(PlanFile)) {
-		t.Errorf("plan session: %+v", s)
+	if len(s.goals) != 1 || !strings.Contains(s.goals[0], "every task in "+r.File(TasksFile)+" is ticked") {
+		t.Errorf("goals = %q", s.goals)
 	}
-	if s := g.d.sessions["S4"]; s.turns != 0 || len(s.goals) != 1 || !strings.Contains(s.prompts[0], "task 1 of 2") {
-		t.Errorf("first work session: %+v", s)
+	if s.state != protocol.StateCompleted {
+		t.Errorf("the session was left %s when the run ended", s.state)
 	}
-	if s := g.d.sessions["S5"]; !strings.Contains(s.prompts[0], "task 2 of 2") || !strings.Contains(s.goals[0], "Test Median") {
-		t.Errorf("second work session: %+v", s)
+	if s.cleared != 1 || s.goalActive {
+		t.Errorf("the work's goal should be cleared before the reflection: cleared %d, active %v", s.cleared, s.goalActive)
 	}
-	if !slices.Equal(g.claude.asked, []string{"plan", "verify", "final"}) {
+	if !slices.Equal(g.claude.asked, []string{"final"}) {
 		t.Errorf("claude was asked %q", g.claude.asked)
 	}
 	if len(g.gh.prs) != 1 || !strings.HasPrefix(g.gh.prs[0], "main|rho/"+r.Slug+"|Add a Median function to stats|rho|") ||
-		!strings.Contains(g.gh.prs[0], "consider generics") || !strings.Contains(g.gh.prs[0], "<!-- rho -->") {
+		!strings.Contains(g.gh.prs[0], "consider generics") || !strings.Contains(g.gh.prs[0], "<!-- rho -->") ||
+		!strings.Contains(g.gh.prs[0], "Claude reviewed the finished work") {
 		t.Errorf("pr = %q", g.gh.prs)
 	}
 	if !slices.Equal(g.git.pushed, []string{r.Branch}) {
 		t.Errorf("pushed %q", g.git.pushed)
-	}
-	tasks, _ := g.rn.tasks(r)
-	if _, left := NextTask(tasks); left != 0 {
-		t.Errorf("%d tasks left unticked", left)
 	}
 	h := g.d.homes["H1"]
 	if !slices.Equal(h.labels, []string{"run:done"}) {
@@ -671,7 +654,7 @@ func TestAWholeRun(t *testing.T) {
 	for _, ls := range h.labelHistory {
 		steps = append(steps, strings.Join(ls, ","))
 	}
-	for _, s := range []string{"run:setup", "run:plan", "run:tasks", "run:verify", "run:work", "run:reflect", "run:done"} {
+	for _, s := range []string{"run:setup", "run:work", "run:reflect", "run:done"} {
 		if !slices.Contains(steps, s) {
 			t.Errorf("the home was never labeled %s: %q", s, steps)
 		}
@@ -683,264 +666,151 @@ func TestAPlainRunWritesItsBrief(t *testing.T) {
 	g.ask("H1", "")
 	g.tick()
 	r := g.run("H1")
-	if r.Step != StepBrief || !strings.HasPrefix(r.Slug, "add-a-median-function-") {
+	if r.Step != StepWork || !strings.HasPrefix(r.Slug, "add-a-median-function-") {
 		t.Fatalf("run = %+v", r)
 	}
-	if p := g.d.sessions["S1"].prompts[0]; !strings.Contains(p, "user: add a median function") {
-		t.Errorf("brief prompt lacks the conversation:\n%s", p)
+	if p := g.d.sessions["S1"].prompts[0]; !strings.Contains(p, "user: add a median function") || !strings.Contains(p, "There is no brief yet") {
+		t.Errorf("the work prompt lacks the conversation:\n%s", p)
 	}
-	g.finish(map[string]string{r.File(BriefFile): "Add a Median function.\n"})
+	g.finish(map[string]string{r.File(BriefFile): "Add a Median function.\n", r.File(PlanFile): "p", r.File(TasksFile): doneTasks, "stats.go": "x"})
 	g.tick()
-	if r.Step != StepPlan || g.d.homes["H1"].description != "Add a Median function." {
-		t.Errorf("step %q, home description %q", r.Step, g.d.homes["H1"].description)
+	if r.Step != StepDone || r.Brief != "Add a Median function." || g.d.homes["H1"].description != "Add a Median function." {
+		t.Errorf("run %+v, home description %q", r, g.d.homes["H1"].description)
 	}
 }
 
-func TestASessionThatTouchesVerifyIsThrownAway(t *testing.T) {
+// A brief given with the run is the session's to read, not to write.
+func TestAGivenBriefIsNotWrittenAgain(t *testing.T) {
 	g := newRig(t)
-	r := g.planned("H1")
-	start := r.Start
-	g.finish(map[string]string{"stats.go": "x", r.File(VerifyFile): "exit 0\n"})
-	g.tick()
-	if len(g.git.resets) != 1 || g.git.resets[0] != start {
-		t.Fatalf("resets = %q, want back to %s", g.git.resets, start)
+	r := g.started("H1")
+	if p := g.d.sessions["S1"].prompts[0]; !strings.Contains(p, "The brief is in "+r.File(BriefFile)) || strings.Contains(p, "## The conversation") {
+		t.Errorf("work prompt:\n%s", p)
 	}
-	if r.Step != StepWork || r.Attempt != 1 || !strings.Contains(g.log.String(), "changed verify.sh") {
-		t.Errorf("run = %+v\nlog:\n%s", r, g.log.String())
-	}
-	g.finish(map[string]string{"stats.go": "x", r.File(VerifyFile): "exit 0\n"})
+}
+
+// One session doing the whole run often ends its turn partway. It is told
+// what is left, in the same session, and carries on.
+func TestASessionThatStopsShortIsToldAndCarriesOn(t *testing.T) {
+	g := newRig(t)
+	r := g.started("H1")
+	g.finish(map[string]string{r.File(PlanFile): "p", r.File(TasksFile): twoTasks, "stats.go": "x"})
 	g.tick()
+	s := g.d.sessions["S1"]
+	if len(s.prompts) != 2 || !strings.Contains(s.prompts[1], "2 of the 2 tasks in "+r.File(TasksFile)+" are not ticked") {
+		t.Fatalf("prompts = %q", s.prompts)
+	}
+	if r.Step != StepWork || r.Attempt != 0 || r.Nudges != 1 || len(g.d.order) != 1 {
+		t.Fatalf("a nudge is not a failure: %+v", r)
+	}
+	g.tick() // it has not answered the nudge yet: nothing happens
+	if len(s.prompts) != 2 {
+		t.Fatalf("after a quiet tick: %d prompts", len(s.prompts))
+	}
+	g.finish(map[string]string{r.File(TasksFile): doneTasks})
+	g.tick()
+	if r.Step != StepDone || len(g.d.order) != 1 {
+		t.Errorf("run = %+v, sessions %d", r, len(g.d.order))
+	}
+}
+
+// Past maxNudges it is a failed try, and the retry goes to the same session,
+// saying what is still missing.
+func TestNudgesAreCappedThenTheSessionIsAskedAgain(t *testing.T) {
+	g := newRig(t)
+	r := g.started("H1")
+	for range maxNudges + 1 {
+		g.finish(nil)
+		g.tick()
+	}
+	s := g.d.sessions["S1"]
+	if r.Step != StepWork || r.Attempt != 1 || len(g.d.order) != 1 || r.Nudges != 0 {
+		t.Fatalf("run = %+v, sessions %d", r, len(g.d.order))
+	}
+	last := s.prompts[len(s.prompts)-1]
+	if len(s.prompts) != maxNudges+2 || !strings.HasPrefix(last, "The run is not done: ") || !strings.Contains(last, r.File(PlanFile)+" is not written") {
+		t.Errorf("prompts = %q", s.prompts)
+	}
+	for range maxNudges + 1 {
+		g.finish(nil)
+		g.tick()
+	}
 	if r.Step != StepFailed || r.FailedAt != StepWork {
-		t.Errorf("a second touch should fail the run: %+v", r)
+		t.Errorf("run = %+v", r)
 	}
 }
 
-func TestCheckFailsThenAFixPasses(t *testing.T) {
+func TestWorkLeftUncommittedIsAskedFor(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false, false, false, true} // before work, then check, check, check
-	r := g.planned("H1")
-	g.finish(map[string]string{"stats.go": "x"})
+	r := g.started("H1")
+	g.doAll(r, "p")
+	g.git.dirty["stats_test.go"] = true
 	g.tick()
+	s := g.d.sessions["S1"]
+	if r.Step != StepWork || !strings.Contains(s.prompts[len(s.prompts)-1], "changes not committed: stats_test.go") {
+		t.Fatalf("run = %+v, prompts %q", r, s.prompts)
+	}
 	g.finish(map[string]string{"stats_test.go": "x"})
-	g.tick()
-	if r.Step != StepFix || r.Fixes != 1 {
-		t.Fatalf("run = %+v", r)
-	}
-	_, s := g.d.last()
-	if !strings.Contains(s.prompts[0], "FAIL TestMedian") || len(s.goals) != 1 {
-		t.Errorf("fix session: %+v", s)
-	}
-	if h := g.d.homes["H1"].labels; !slices.Equal(h, []string{"run:fix", "run:attempt:1/10"}) {
-		t.Errorf("home labels = %q", h)
-	}
-	g.finish(map[string]string{"stats.go": "y"})
-	g.tick()
-	g.finish(map[string]string{"stats.go": "z"})
-	g.tick()
-	if r.Step != StepDone || r.Fixes != 2 {
-		t.Errorf("run = %+v\nlog:\n%s", r, g.log.String())
-	}
-}
-
-func TestARevisionIsWrittenByClaude(t *testing.T) {
-	g := newRig(t)
-	g.shell.results = []bool{false, false}
-	g.claude.answers["revise"] = []string{"The test name is wrong.\n" + Begin(VerifyFile) + "\ngo test -run TestMedianOf ./...\n" + End(VerifyFile)}
-	r := g.planned("H1")
-	g.finish(map[string]string{"stats.go": "x"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "x"})
-	g.tick() // check fails; fix
-	g.finish(map[string]string{r.File(RevisionFile): "The check runs TestMedian; the test is TestMedianOf."})
-	g.tick() // revise, then check passes, final, pr
-
-	if r.Step != StepDone || r.Revisions != 1 {
-		t.Fatalf("run = %+v\nlog:\n%s", r, g.log.String())
-	}
-	msgs := g.git.messages()
-	i := slices.Index(msgs, "run: verify.sh revised by claude")
-	if i < 0 || msgs[i+1] != "run: revision request answered" {
-		t.Errorf("commits = %q", msgs)
-	}
-	if text, _ := g.rn.read(r, VerifyFile); text != "go test -run TestMedianOf ./...\n" {
-		t.Errorf("verify.sh = %q", text)
-	}
-	if _, ok := g.rn.read(r, RevisionFile); ok {
-		t.Error("the revision request was left in the worktree")
-	}
-}
-
-func TestARefusedRevisionAdvisesTheNextFix(t *testing.T) {
-	g := newRig(t)
-	g.shell.results = []bool{false, false, false}
-	g.claude.answers["revise"] = []string{"REFUSED: the check is right; Median sorts its input in place."}
-	r := g.planned("H1")
-	g.finish(map[string]string{"stats.go": "x"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "x"})
-	g.tick()
-	g.finish(map[string]string{r.File(RevisionFile): "the check is wrong"})
-	g.tick() // revise refuses, check fails again, next fix starts
-	if r.Step != StepFix || r.Revisions != 1 {
-		t.Fatalf("run = %+v", r)
-	}
-	_, s := g.d.last()
-	if !strings.Contains(s.prompts[0], "Median sorts its input in place.") {
-		t.Errorf("the refusal did not reach the next fix:\n%s", s.prompts[0])
-	}
-	if r.Advice != "" {
-		t.Error("advice passed on is still kept")
-	}
-}
-
-func TestBlockersBecomeTasksOnce(t *testing.T) {
-	g := newRig(t)
-	g.shell.results = []bool{false}
-	g.claude.answers["final"] = []string{"```json\n{\"blockers\":[{\"title\":\"Median of an even count\",\"detail\":\"averages the middle two\"}],\"notes\":[]}\n```"}
-	r := g.planned("H1")
-	g.finish(map[string]string{"stats.go": "x"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "x"})
-	g.tick()
-	if r.Step != StepWork {
-		t.Fatalf("blockers should send the run back to work: %+v", r)
-	}
-	_, s := g.d.last()
-	if !strings.Contains(s.prompts[0], "Median of an even count") || !strings.Contains(s.prompts[0], "task 3 of 3") {
-		t.Errorf("blocker task prompt:\n%s", s.prompts[0])
-	}
-	g.finish(map[string]string{"stats.go": "y"})
 	g.tick()
 	if r.Step != StepDone {
 		t.Errorf("run = %+v", r)
 	}
-	if n := strings.Count(strings.Join(g.claude.asked, ","), "final"); n != 1 {
-		t.Errorf("final review asked %d times", n)
-	}
 }
 
-func TestTheFixCapFailsTheRunAndRunResumesIt(t *testing.T) {
+// The run's own files are what it is judged on, so the runner commits them
+// when the session forgets to.
+func TestTheRunsFilesLeftUncommittedAreCommittedByTheRunner(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
-	for range MaxFixes + 1 {
-		g.shell.results = append(g.shell.results, false)
-	}
-	r := g.planned("H1")
-	g.finish(map[string]string{"stats.go": "x"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "x"})
-	g.tick()
-	for range MaxFixes {
-		g.finish(map[string]string{"stats.go": "again"})
-		g.tick()
-	}
-	if r.Step != StepFailed || r.FailedAt != StepFix {
-		t.Fatalf("run = %+v", r)
-	}
-	if !slices.Equal(g.d.homes["H1"].labels, []string{"run:failed"}) {
-		t.Errorf("home labels = %q", g.d.homes["H1"].labels)
-	}
-	g.ask("H1", "")
-	g.tick() // resumed: check passes (queue empty), final, pr
-	if r.Step != StepDone {
-		t.Errorf("resumed run = %+v\nlog:\n%s", r, g.log.String())
-	}
-}
-
-func TestARestartMidSessionCarriesOn(t *testing.T) {
-	g := newRig(t)
-	r := g.planned("H1")
-	g.rn = g.runner(g.rn.Root) // a new process over the same state
-	g.finish(map[string]string{"stats.go": "x"})
-	g.tick()
-	if got := g.run("H1"); got.Step != StepWork || got.Task != 1 || r.Home != got.Home {
-		t.Errorf("after restart: %+v", got)
-	}
-}
-
-func TestAFailedSessionIsRetriedClean(t *testing.T) {
-	g := newRig(t)
-	g.ask("H1", "Add a Median function")
-	g.tick()
-	r := g.run("H1")
+	r := g.started("H1")
 	_, s := g.d.last()
-	s.state = protocol.StateBlocked
+	full := filepath.Join(s.workspace, filepath.FromSlash(r.File(TasksFile)))
+	if err := os.WriteFile(full, []byte(doneTasks), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g.git.dirty[r.File(TasksFile)] = true
+	g.finish(map[string]string{r.File(PlanFile): "p", "stats.go": "x"})
 	g.tick()
-	if r.Step != StepPlan || r.Attempt != 1 || len(g.git.resets) != 1 || len(g.d.order) != 2 {
-		t.Errorf("run = %+v, resets %q, sessions %d", r, g.git.resets, len(g.d.order))
+	var got []string
+	for _, c := range g.git.log {
+		if c.msg == "run: work (committed by the runner)" {
+			got = c.files
+		}
+	}
+	if !slices.Equal(got, []string{r.File(TasksFile)}) || r.Step != StepDone {
+		t.Errorf("runner's commit = %q, run = %+v\nlog:\n%s", got, r, g.log.String())
 	}
 }
 
-// Seen live: a fix session committed a revision request, then its stop gate
-// refused every stop over a check it could not clear, and it ended blocked.
-// The runner threw both commits away and started the fix over.
-func TestABlockedFixIsJudgedOnWhatItCommitted(t *testing.T) {
+// A session that ended some other way, stopped from outside or out of turns,
+// keeps what it committed; a new session carries on from it.
+func TestASessionThatEndsIsReplacedAndCarriesOn(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false, false}
-	g.claude.answers["revise"] = []string{"The test name is wrong.\n" + Begin(VerifyFile) + "\ngo test -run TestMedianOf ./...\n" + End(VerifyFile)}
-	r := g.planned("H1")
-	g.finish(map[string]string{"stats.go": "x"})
+	r := g.started("H1")
+	g.git.commit("session: plan", r.File(PlanFile))
+	head := g.git.log[len(g.git.log)-1].sha
+	g.git.dirty["scratch.txt"] = true
+	g.d.sessions["S1"].state = protocol.StateCompleted
 	g.tick()
-	g.finish(map[string]string{"stats_test.go": "x"})
-	g.tick() // check fails; fix
-	if r.Step != StepFix {
-		t.Fatalf("run = %+v", r)
+	if r.Step != StepWork || r.Attempt != 1 || len(g.d.order) != 2 || r.Session != "S2" {
+		t.Fatalf("run = %+v, sessions %d\nlog:\n%s", r, len(g.d.order), g.log.String())
 	}
-	start := r.Start
-	g.finish(map[string]string{r.File(RevisionFile): "The check runs TestMedian; the test is TestMedianOf."})
-	_, s := g.d.last()
-	s.state = protocol.StateBlocked
-	g.tick() // revise, then check passes, final, pr
-
-	if slices.Contains(g.git.resets, start) {
-		t.Errorf("the fix session's commits were thrown away: resets %q", g.git.resets)
+	if g.git.log[len(g.git.log)-1].sha != head || len(g.git.dirty) != 0 {
+		t.Errorf("the committed work should stay and the rest go: log %v, dirty %v", g.git.log, g.git.dirty)
 	}
-	if r.Step != StepDone || r.Revisions != 1 {
-		t.Errorf("run = %+v\nlog:\n%s", r, g.log.String())
-	}
-	if s.state != protocol.StateCompleted {
-		t.Errorf("the blocked session was left %s", s.state)
+	if p := g.d.sessions["S2"].prompts[0]; !strings.Contains(p, "1. **Plan.**") || !strings.Contains(p, "carry on from the first unticked task") {
+		t.Errorf("the new session should get the whole work prompt:\n%s", p)
 	}
 }
 
-// What it left uncommitted is not part of the fix: the check runs on the
-// worktree, and would judge files the pull request never gets.
-func TestABlockedFixLosesOnlyWhatItLeftUncommitted(t *testing.T) {
+// A session its stop gate held back is judged on what it left, as one that
+// ended its turn is.
+func TestABlockedSessionIsJudgedOnWhatItLeft(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false, false}
-	r := g.planned("H1")
-	g.finish(map[string]string{"stats.go": "x"})
+	r := g.started("H1")
+	g.doAll(r, "p")
+	g.d.sessions["S1"].state = protocol.StateBlocked
 	g.tick()
-	g.finish(map[string]string{"stats_test.go": "x"})
-	g.tick() // check fails; fix
-	start := r.Start
-	g.finish(map[string]string{"stats.go": "fixed"})
-	head, _ := g.git.Head(context.Background(), r.Worktree)
-	g.git.dirty = map[string]bool{"scratch.txt": true}
-	_, s := g.d.last()
-	s.state = protocol.StateBlocked
-	g.tick() // check passes, final, pr
-
-	if slices.Contains(g.git.resets, start) || !slices.Contains(g.git.resets, head) {
-		t.Errorf("resets = %q, want only back to the session's last commit %s", g.git.resets, head)
-	}
-	if r.Step != StepDone || r.Fixes != 1 {
-		t.Errorf("run = %+v\nlog:\n%s", r, g.log.String())
-	}
-}
-
-// Any other step still starts over: a blocked plan or work session has not
-// done its job, and nothing after it would catch that.
-func TestABlockedWorkSessionIsStillThrownAway(t *testing.T) {
-	g := newRig(t)
-	r := g.planned("H1")
-	start := r.Start
-	g.finish(map[string]string{"stats.go": "x"})
-	_, s := g.d.last()
-	s.state = protocol.StateBlocked
-	g.tick()
-	if !slices.Equal(g.git.resets, []string{start}) || r.Step != StepWork || r.Attempt != 1 {
-		t.Errorf("run = %+v, resets %q", r, g.git.resets)
+	if r.Step != StepDone || len(g.d.order) != 1 {
+		t.Errorf("run = %+v, sessions %d\nlog:\n%s", r, len(g.d.order), g.log.String())
 	}
 }
 
@@ -949,15 +819,12 @@ func TestABlockedWorkSessionIsStillThrownAway(t *testing.T) {
 // at every poll.
 func TestAFileTheResetCannotRemoveDoesNotStopTheRetry(t *testing.T) {
 	g := newRig(t)
-	g.ask("H1", "Add a Median function")
-	g.tick()
-	r := g.run("H1")
-	_, s := g.d.last()
-	s.state = protocol.StateBlocked
+	r := g.started("H1")
+	g.d.sessions["S1"].state = protocol.StateError
 	g.git.cleanErr = &UncleanError{Err: errors.New("git clean -fd: warning: failed to remove nul: Permission denied")}
 	g.tick()
-	if r.Step != StepPlan || r.Attempt != 1 || len(g.git.resets) != 1 || len(g.d.order) != 2 {
-		t.Errorf("run = %+v, resets %q, sessions %d", r, g.git.resets, len(g.d.order))
+	if r.Step != StepWork || r.Attempt != 1 || len(g.d.order) != 2 {
+		t.Errorf("run = %+v, sessions %d", r, len(g.d.order))
 	}
 	if !strings.Contains(g.log.String(), "failed to remove nul") {
 		t.Errorf("the file left behind is not logged:\n%s", g.log.String())
@@ -967,11 +834,8 @@ func TestAFileTheResetCannotRemoveDoesNotStopTheRetry(t *testing.T) {
 // Any other reset failure still stops the step, to be tried at the next poll.
 func TestAFailedResetIsNotRecordedAsDone(t *testing.T) {
 	g := newRig(t)
-	g.ask("H1", "Add a Median function")
-	g.tick()
-	r := g.run("H1")
-	_, s := g.d.last()
-	s.state = protocol.StateBlocked
+	r := g.started("H1")
+	g.d.sessions["S1"].state = protocol.StateError
 	g.git.cleanErr = errors.New("git reset --hard: fatal: index.lock exists")
 	if err := g.rn.Advance(context.Background(), g.d); err == nil || !strings.Contains(err.Error(), "index.lock") {
 		t.Errorf("advance = %v, want the reset's error", err)
@@ -996,23 +860,22 @@ func TestNoClaudeNoRun(t *testing.T) {
 
 func TestClaudeFailuresAreRetriedAtTheNextPoll(t *testing.T) {
 	g := newRig(t)
-	// verify-review errors, then gives an answer that is neither form, then
-	// approves: one try per poll.
-	g.claude.answers["verify"] = []string{"ERROR", "I'm not sure about this script."}
-	g.ask("H1", "Add a Median function")
+	// The final review errors, then gives an answer in no form, then passes:
+	// one try per poll.
+	g.claude.answers["final"] = []string{"ERROR", "Looks fine to me."}
+	r := g.started("H1")
+	g.doAll(r, "p")
 	g.tick()
-	run := g.run("H1")
-	g.finish(map[string]string{run.File(PlanFile): "p"})
-	g.tick()
-	g.finish(map[string]string{run.File(VerifyFile): "v"})
-	g.tick() // error: stays at verify-review
-	if run.Step != StepVerifyReview || run.Attempt != 1 {
-		t.Fatalf("run = %+v", run)
+	if r.Step != StepFinalReview || r.Attempt != 1 {
+		t.Fatalf("run = %+v", r)
 	}
-	g.tick() // an unreadable answer: still there
-	g.tick() // approved (queue empty), and on to the tasks
-	if run.Step != StepTasks {
-		t.Errorf("run = %+v\nlog:\n%s", run, g.log.String())
+	g.tick()
+	if r.Step != StepFinalReview || r.Attempt != 2 {
+		t.Fatalf("run = %+v", r)
+	}
+	g.tick()
+	if r.Step != StepDone {
+		t.Errorf("run = %+v\nlog:\n%s", r, g.log.String())
 	}
 }
 
@@ -1023,15 +886,13 @@ const limitReason = "You've hit your weekly limit · resets 2pm"
 // it takes, and says why; the log says so once, not at every poll.
 func TestAGateClaudeDoesNotAnswerParks(t *testing.T) {
 	g := newRig(t)
-	g.claude.answers["plan"] = []string{"LIMIT", "LIMIT", "LIMIT", "LIMIT", "LIMIT"}
-	g.ask("H1", "Add a Median function")
-	g.tick()
-	r := g.run("H1")
-	g.finish(map[string]string{r.File(PlanFile): "p"})
+	g.claude.answers["final"] = []string{"LIMIT", "LIMIT", "LIMIT", "LIMIT", "LIMIT"}
+	r := g.started("H1")
+	g.doAll(r, "p")
 	for range 4 {
 		g.tick()
 	}
-	if r.Step != StepPlanReview || r.Attempt != 0 || r.Parked != limitReason {
+	if r.Step != StepFinalReview || r.Attempt != 0 || r.Parked != limitReason {
 		t.Fatalf("run = %+v\nlog:\n%s", r, g.log.String())
 	}
 	saved, err := LoadAll(g.rn.Root)
@@ -1039,228 +900,120 @@ func TestAGateClaudeDoesNotAnswerParks(t *testing.T) {
 		t.Errorf("saved = %+v, %v", saved, err)
 	}
 	all := statuses(t, g.d.homes["H1"])
-	if last := all[len(all)-1]; last.Step != StepPlanReview || last.Parked != limitReason {
+	if last := all[len(all)-1]; last.Step != StepFinalReview || last.Parked != limitReason {
 		t.Errorf("status = %+v", last)
 	}
-	if n := strings.Count(g.log.String(), "waiting for Claude at plan-review"); n != 1 {
+	if n := strings.Count(g.log.String(), "waiting for Claude at final-review"); n != 1 {
 		t.Errorf("parking logged %d times:\n%s", n, g.log.String())
 	}
-
 	g.tick() // the fifth refusal
 	g.tick() // Claude answers
-	if r.Step != StepVerify || r.Parked != "" {
+	if r.Step != StepDone || r.Parked != "" || !strings.Contains(g.log.String(), "Claude answered at final-review") {
 		t.Fatalf("run = %+v\nlog:\n%s", r, g.log.String())
 	}
-	if !strings.Contains(g.log.String(), "Claude answered at plan-review") {
-		t.Errorf("log:\n%s", g.log.String())
+}
+
+// The final review's blockers become tasks, and go back to the same session,
+// which still has the work in its context. The review is asked once.
+func TestBlockersGoBackToTheSameSession(t *testing.T) {
+	g := newRig(t)
+	g.claude.answers["final"] = []string{"```json\n{\"blockers\":[{\"title\":\"Median of an even count\",\"detail\":\"averages the middle two\"}],\"notes\":[]}\n```"}
+	r := g.started("H1")
+	g.doAll(r, "p")
+	g.tick()
+	if r.Step != StepWork || len(g.d.order) != 1 || len(r.Blockers) != 0 {
+		t.Fatalf("blockers should send the run back to work in its session: %+v", r)
 	}
-	if all := statuses(t, g.d.homes["H1"]); all[len(all)-1].Parked != "" {
-		t.Errorf("status still parked: %+v", all[len(all)-1])
+	s := g.d.sessions["S1"]
+	if p := s.prompts[len(s.prompts)-1]; !strings.Contains(p, "**Median of an even count**: averages the middle two") {
+		t.Errorf("blockers prompt:\n%s", p)
+	}
+	tasks, _ := g.rn.tasks(r)
+	if len(tasks) != 3 || tasks[2].Done || tasks[2].Title != "Median of an even count" {
+		t.Fatalf("tasks = %+v", tasks)
+	}
+	g.finish(map[string]string{r.File(TasksFile): doneTasks + "- [x] Median of an even count\n", "stats.go": "y"})
+	g.tick()
+	if r.Step != StepDone || len(g.d.order) != 1 {
+		t.Errorf("run = %+v\nlog:\n%s", r, g.log.String())
+	}
+	if n := strings.Count(strings.Join(g.claude.asked, ","), "final"); n != 1 {
+		t.Errorf("final review asked %d times", n)
 	}
 }
 
-// Seen live: a tasks session read the brief and the plan and ended its turn,
-// twice, and the run failed. A session that ends without what its step needs
-// is told so once, in the same session.
-func TestASessionThatStopsShortIsToldOnce(t *testing.T) {
+func TestARestartMidSessionCarriesOn(t *testing.T) {
+	g := newRig(t)
+	r := g.started("H1")
+	g.rn = g.runner(g.rn.Root) // a new process over the same state
+	g.doAll(r, "p")
+	g.tick()
+	if got := g.run("H1"); got.Step != StepDone || len(g.d.order) != 1 {
+		t.Errorf("after restart: %+v, sessions %d", got, len(g.d.order))
+	}
+}
+
+// A restart between making the session and prompting it prompts it, rather
+// than making another.
+func TestARestartBeforeThePromptSendsIt(t *testing.T) {
 	g := newRig(t)
 	g.ask("H1", "Add a Median function")
 	g.tick()
 	r := g.run("H1")
-	g.finish(map[string]string{r.File(PlanFile): "p"})
-	g.tick() // plan-review, then the verify session
-	g.finish(map[string]string{r.File(VerifyFile): "v"})
-	g.tick() // verify-review, then the tasks session
-	g.finish(nil)
-	g.tick()
-	id, s := g.d.last()
-	if len(s.prompts) != 2 || !strings.Contains(s.prompts[1], "without writing "+r.File(TasksFile)) {
-		t.Fatalf("session %s prompts = %q", id, s.prompts)
-	}
-	if r.Step != StepTasks || r.Session != id || r.Attempt != 0 {
-		t.Fatalf("a nudge is not a failure: %+v", r)
-	}
-	g.tick() // it has not answered the nudge yet: nothing happens
-	if r.Step != StepTasks || len(s.prompts) != 2 {
-		t.Fatalf("after a quiet tick: %+v, %d prompts", r, len(s.prompts))
-	}
-	g.finish(map[string]string{r.File(TasksFile): twoTasks})
-	g.tick()
-	// plan, verify and tasks, then the first task's session.
-	if r.Step != StepWork || len(g.d.order) != 4 {
-		t.Errorf("run = %+v, sessions %d", r, len(g.d.order))
-	}
-}
-
-func TestANudgeIsGivenOnlyOnce(t *testing.T) {
-	g := newRig(t)
-	g.ask("H1", "Add a Median function")
-	g.tick()
-	r := g.run("H1")
-	g.finish(nil)
-	g.tick() // nudged
-	g.finish(nil)
-	g.tick() // still nothing: a failed attempt, and a fresh session
-	if r.Step != StepPlan || r.Attempt != 1 || len(g.d.order) != 2 {
-		t.Errorf("run = %+v, sessions %d", r, len(g.d.order))
-	}
-	if _, s := g.d.last(); len(s.prompts) != 1 {
-		t.Errorf("the retry was nudged before it began: %q", s.prompts)
-	}
-}
-
-func TestAWorkSessionThatCommitsNothingIsToldOnce(t *testing.T) {
-	g := newRig(t)
-	r := g.planned("H1")
-	g.finish(nil)
-	g.tick()
-	_, s := g.d.last()
-	if len(s.prompts) != 2 || !strings.Contains(s.prompts[1], "without committing anything") {
-		t.Fatalf("prompts = %q", s.prompts)
-	}
-	g.finish(map[string]string{"stats.go": "x"})
-	g.tick()
-	if r.Step != StepWork || r.Task != 1 {
-		t.Errorf("run = %+v", r)
-	}
-}
-
-// Seen live: the verify session wrote the feature and its tests as well, so
-// the check passed before any work. A planning step writes its own file only.
-func TestAPlanningStepMayWriteOnlyItsFile(t *testing.T) {
-	g := newRig(t)
-	g.ask("H1", "Add a Median function")
-	g.tick()
-	r := g.run("H1")
-	start := r.Start
-	g.finish(map[string]string{r.File(PlanFile): "p", "stats.go": "func Median() {}"})
-	g.tick()
-	if r.Step != StepPlan || r.Attempt != 1 || len(g.git.resets) != 1 || g.git.resets[0] != start {
-		t.Fatalf("run = %+v, resets %q", r, g.git.resets)
-	}
-	if !strings.Contains(g.log.String(), "may write only "+r.File(PlanFile)+" and "+r.File(MapFile)+", and the session also changed stats.go") {
-		t.Errorf("log:\n%s", g.log.String())
-	}
-	if p := g.d.sessions["S1"].prompts[0]; !strings.Contains(p, "Write only "+r.File(PlanFile)) {
-		t.Errorf("the plan prompt does not say so:\n%s", p)
-	}
-}
-
-// A plan session starts from the outline, committed before it began, and one
-// that leaves it as it is has not planned
-// (docs/specs/2026-10-18-plan-outline-design.md).
-func TestAPlanSessionFillsInTheOutline(t *testing.T) {
-	g := newRig(t)
-	g.ask("H1", "Add a Median function")
-	g.tick()
-	r := g.run("H1")
-	_, s := g.d.last()
-	text, err := os.ReadFile(filepath.Join(s.workspace, filepath.FromSlash(r.File(PlanFile))))
-	if err != nil || string(text) != PlanOutline {
-		t.Fatalf("plan.md when the session starts = %q, %v", text, err)
-	}
-	if got := g.git.messages(); got[len(got)-1] != "run: plan outline" || r.Start != g.git.log[len(g.git.log)-1].sha {
-		t.Fatalf("the outline must be committed before Start: commits %q, start %s", got, r.Start)
-	}
-
-	g.finish(map[string]string{r.File(MapFile): "stats.go: Mean and Sum"})
-	g.tick()
-	if p := s.prompts[len(s.prompts)-1]; !strings.Contains(p, "without filling in the outline in "+r.File(PlanFile)) {
-		t.Fatalf("the session should be told once: %q", p)
-	}
-	g.finish(nil)
-	g.tick()
-	if r.Step != StepPlan || r.Attempt != 1 || !strings.Contains(g.log.String(), "did not fill in the outline in "+r.File(PlanFile)) {
-		t.Fatalf("run = %+v\nlog:\n%s", r, g.log.String())
-	}
-
-	// The retry starts from the same outline, with no second commit of it.
-	g.tick()
-	if n := strings.Count(strings.Join(g.git.history, "\n"), "run: plan outline"); n != 1 {
-		t.Errorf("the outline was committed %d times", n)
-	}
-	g.finish(map[string]string{r.File(PlanFile): "# Plan\n\n## Approach\nAdd Median beside Mean.\n"})
-	g.tick()
-	if r.Step == StepPlan {
-		t.Errorf("a filled-in plan should end the step: run = %+v\nlog:\n%s", r, g.log.String())
-	}
-}
-
-// The map is every planning step's to keep (docs/specs/2026-10-17-run-map-design.md).
-func TestAPlanningStepMayAlsoWriteTheMap(t *testing.T) {
-	g := newRig(t)
-	g.ask("H1", "Add a Median function")
-	g.tick()
-	r := g.run("H1")
-	g.finish(map[string]string{r.File(PlanFile): "p", r.File(MapFile): "stats.go: Mean and Sum"})
-	g.tick()
-	if r.Step == StepPlan || len(g.git.resets) != 0 {
-		t.Fatalf("run = %+v, resets %q\nlog:\n%s", r, g.git.resets, g.log.String())
-	}
-}
-
-// A map left uncommitted goes in with the step's file, as the file itself does.
-func TestAMapLeftUncommittedIsCommittedByTheRunner(t *testing.T) {
-	g := newRig(t)
-	g.ask("H1", "Add a Median function")
-	g.tick()
-	r := g.run("H1")
-	_, s := g.d.last()
-	full := filepath.Join(s.workspace, filepath.FromSlash(r.File(MapFile)))
-	if err := os.WriteFile(full, []byte("stats.go: Mean and Sum"), 0o644); err != nil {
+	r.Prompted, r.Fresh = false, true
+	s := g.d.sessions["S1"]
+	s.prompts, s.goals, s.state = nil, nil, protocol.StateIdle
+	if err := r.Save(g.rn.Root); err != nil {
 		t.Fatal(err)
 	}
-	g.git.dirty[r.File(MapFile)] = true
-	g.finish(map[string]string{r.File(PlanFile): "p"})
+	g.rn = g.runner(g.rn.Root)
 	g.tick()
-	var got []string
-	for _, c := range g.git.log {
-		if c.msg == "run: plan (committed by the runner)" {
-			got = c.files
+	if len(g.d.order) != 1 || len(s.prompts) != 1 || !strings.Contains(s.prompts[0], "1. **Plan.**") {
+		t.Errorf("sessions %d, prompts %q", len(g.d.order), s.prompts)
+	}
+}
+
+// A run saved by the runner before it was one session can be at a step that
+// is gone: before its PR it picks up at work, in a new session, from what is
+// on its branch; after, it watches CI.
+func TestARunAtAGoneStepIsUpgraded(t *testing.T) {
+	g := newRig(t)
+	g.d.homes["H1"] = &fakeHome{workspace: t.TempDir(), description: "Add a Median function"}
+	g.d.homes["H2"] = &fakeHome{workspace: t.TempDir(), description: "Add a Mode function"}
+	old := Run{Home: "H1", Workspace: g.d.homes["H1"].workspace, Brief: "Add a Median function", Slug: "median", Branch: "rho/median",
+		Base: "main", Worktree: filepath.Join(g.rn.Root, "runner", "worktrees", "median"), Step: "verify-review", Session: "OLD", Started: g.now}
+	withPR := Run{Home: "H2", Workspace: g.d.homes["H2"].workspace, Brief: "Add a Mode function", Slug: "mode", Branch: "rho/mode",
+		Base: "main", Worktree: filepath.Join(g.rn.Root, "runner", "worktrees", "mode"), Step: "check", PR: 9, Started: g.now}
+	for _, r := range []Run{old, withPR} {
+		if err := os.MkdirAll(r.Worktree, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Save(g.rn.Root); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if !slices.Contains(got, r.File(MapFile)) || r.Step == StepPlan {
-		t.Errorf("runner's commit = %q, run = %+v\nlog:\n%s", got, r, g.log.String())
+	g.git.log = []commit{{sha: "base"}}
+	g.tick()
+	if r := g.run("H1"); r.Step != StepWork || r.Session != "S1" {
+		t.Errorf("old run = %+v", r)
+	}
+	if r := g.run("H2"); r.Step != StepDone && r.Step != StepReflect {
+		t.Errorf("old run with a PR = %+v", r)
 	}
 }
 
-// Seen live: a task an earlier session had already done. The work session
-// committed nothing and its goal was judged met; that task is done.
-func TestATaskAlreadyDoneIsDone(t *testing.T) {
+// A run's session sits idle between its steps, holding no slot.
+func TestARunWaitingOnCIHoldsNoSlot(t *testing.T) {
 	g := newRig(t)
-	r := g.planned("H1")
-	_, s := g.d.last()
-	s.met = true
-	g.finish(nil)
-	g.tick()
-	if r.Step != StepWork || r.Task != 1 || len(g.git.resets) != 0 {
-		t.Fatalf("run = %+v, resets %q", r, g.git.resets)
+	g.gh.polls = []poll{pending}
+	r := g.opened("H1")
+	if r.Step != StepCI || r.Session == "" || g.rn.Busy() != 0 {
+		t.Errorf("run = %+v, busy %d", r, g.rn.Busy())
 	}
-	if len(s.prompts) != 1 {
-		t.Errorf("a session whose goal was met was nudged: %q", s.prompts)
-	}
-	if msgs := g.git.messages(); msgs[len(msgs)-1] != "run: task 1 done" {
-		t.Errorf("commits = %q", msgs)
-	}
-}
-
-// opened takes a run to its open PR, with whatever CI polls the test queued.
-func (g *rig) opened(id string) *Run {
-	g.t.Helper()
-	r := g.planned(id)
-	g.finish(map[string]string{"stats.go": "x"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "x"})
-	g.tick()
-	if r.PR == 0 {
-		g.t.Fatalf("no PR: %+v\nlog:\n%s", r, g.log.String())
-	}
-	return r
 }
 
 func TestCIPendingThenPassing(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
 	g.gh.polls = []poll{pending, pending}
 	r := g.opened("H1")
 	if r.Step != StepCI || r.Attempt != 0 {
@@ -1281,34 +1034,52 @@ func TestCIPendingThenPassing(t *testing.T) {
 
 func TestCIFailingIsFixedAndPushed(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
 	g.gh.polls = []poll{failing}
 	r := g.opened("H1")
-	if r.Step != StepCIFix || r.CIFixes != 1 {
-		t.Fatalf("run = %+v", r)
+	if r.Step != StepCIFix || r.CIFixes != 1 || len(g.d.order) != 1 {
+		t.Fatalf("run = %+v, sessions %d", r, len(g.d.order))
 	}
 	if !slices.Equal(g.d.homes["H1"].labels, []string{"run:ci-fix", "run:attempt:1/5"}) {
 		t.Errorf("home labels = %q", g.d.homes["H1"].labels)
 	}
-	_, s := g.d.last()
+	s := g.d.sessions["S1"]
+	p := s.prompts[len(s.prompts)-1]
 	for _, want := range []string{"### lint", "log of run 42: gofmt -l found stats.go", "### lint (windows)", "under another job of the same run"} {
-		if !strings.Contains(s.prompts[0], want) {
-			t.Errorf("ci-fix prompt lacks %q:\n%s", want, s.prompts[0])
+		if !strings.Contains(p, want) {
+			t.Errorf("ci-fix prompt lacks %q:\n%s", want, p)
 		}
 	}
-	if len(g.gh.logs) != 1 || len(s.goals) != 1 || s.turns != 0 {
-		t.Errorf("logs read %q, goals %q, turns %d", g.gh.logs, s.goals, s.turns)
+	if strings.Contains(p, "taking over") {
+		t.Errorf("the run's own session was told it is new:\n%s", p)
+	}
+	if len(g.gh.logs) != 1 || len(s.goals) != 2 {
+		t.Errorf("logs read %q, goals %q", g.gh.logs, s.goals)
 	}
 	g.finish(map[string]string{"stats.go": "gofmt'd"})
-	g.tick() // check passes, push, ci passes
+	g.tick() // push, ci passes
 	if r.Step != StepDone || len(g.git.pushed) != 2 {
 		t.Errorf("run = %+v, pushes %q\nlog:\n%s", r, g.git.pushed, g.log.String())
 	}
 }
 
+// A ci-fix whose session has ended goes to a new one, told where the run
+// stands first.
+func TestACIFixInANewSessionIsToldWhereTheRunStands(t *testing.T) {
+	g := newRig(t)
+	g.gh.polls = []poll{pending, failing}
+	r := g.opened("H1")
+	g.d.sessions["S1"].state = protocol.StateCompleted
+	g.tick()
+	if r.Step != StepCIFix || r.Session != "S2" {
+		t.Fatalf("run = %+v", r)
+	}
+	if p := g.d.sessions["S2"].prompts[0]; !strings.HasPrefix(p, "You are taking over an automated run") || !strings.Contains(p, "### lint") {
+		t.Errorf("prompt:\n%s", p)
+	}
+}
+
 func TestCIFixesAreCapped(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
 	for range MaxCIFixes + 1 {
 		g.gh.polls = append(g.gh.polls, failing)
 	}
@@ -1326,7 +1097,6 @@ func TestCIMergedOrClosed(t *testing.T) {
 	for state, want := range map[string]Step{"MERGED": StepDone, "CLOSED": StepFailed} {
 		t.Run(state, func(t *testing.T) {
 			g := newRig(t)
-			g.shell.results = []bool{false}
 			g.gh.polls = []poll{{state: state, checks: failing.checks}}
 			if r := g.opened("H1"); r.Step != want {
 				t.Errorf("run = %+v", r)
@@ -1337,7 +1107,6 @@ func TestCIMergedOrClosed(t *testing.T) {
 
 func TestNoChecksAtAllIsDoneAfterAWait(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
 	none := poll{state: "OPEN"}
 	g.gh.polls = []poll{none, none}
 	r := g.opened("H1")
@@ -1355,7 +1124,6 @@ func TestNoChecksAtAllIsDoneAfterAWait(t *testing.T) {
 // takes the moved head and watches its checks.
 func TestARejectedPushFollowsTheMovedBranch(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
 	g.gh.polls = []poll{failing}
 	g.git.pushErrs = []error{nil, errors.New("! [rejected] rho/x -> rho/x (fetch first)")}
 	r := g.opened("H1")
@@ -1371,7 +1139,6 @@ func TestARejectedPushFollowsTheMovedBranch(t *testing.T) {
 
 func TestACIPollThatErrorsIsRetried(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
 	g.gh.polls = []poll{{err: errors.New("gh: HTTP 502")}}
 	r := g.opened("H1")
 	if r.Step != StepCI || r.Attempt != 1 {
@@ -1393,22 +1160,13 @@ func (g *rig) askIssue(id, brief string) {
 
 func TestAnIssueRun(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
 	g.askIssue("H1", "Add a Median function\n\nIt should return a float64.\n\n(From issue kyle/x#12.)")
 	g.tick()
 	r := g.run("H1")
 	if r.Issue != 12 || !strings.HasPrefix(r.Slug, "issue-12-add-a-median-function-") {
 		t.Fatalf("run = %+v", r)
 	}
-	g.finish(map[string]string{r.File(PlanFile): "p"})
-	g.tick()
-	g.finish(map[string]string{r.File(VerifyFile): "v"})
-	g.tick()
-	g.finish(map[string]string{r.File(TasksFile): twoTasks})
-	g.tick()
-	g.finish(map[string]string{"stats.go": "x"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "x"})
+	g.doAll(r, "p")
 	g.tick()
 	if r.Step != StepDone {
 		t.Fatalf("run = %+v\nlog:\n%s", r, g.log.String())
@@ -1431,15 +1189,11 @@ func TestAFailedIssueRunSaysWhereAndResumesWithANewBrief(t *testing.T) {
 	g.askIssue("H1", "Add a Median function")
 	g.tick()
 	r := g.run("H1")
-	g.finish(nil)
-	g.tick() // nudged
-	g.finish(nil)
-	g.tick() // retried
-	g.finish(nil)
-	g.tick() // nudged
-	g.finish(nil)
-	g.tick() // failed at plan
-	if r.Step != StepFailed || len(g.gh.issueComments) != 1 || !strings.Contains(g.gh.issueComments[0], "at the `plan` step") ||
+	for range sessionTries * (maxNudges + 1) {
+		g.finish(nil)
+		g.tick()
+	}
+	if r.Step != StepFailed || len(g.gh.issueComments) != 1 || !strings.Contains(g.gh.issueComments[0], "at the `work` step") ||
 		!strings.Contains(g.gh.issueComments[0], "Edit this issue, or comment on it") {
 		t.Fatalf("run %+v, comments %q", r, g.gh.issueComments)
 	}
@@ -1448,7 +1202,7 @@ func TestAFailedIssueRunSaysWhereAndResumesWithANewBrief(t *testing.T) {
 	g.d.homes["H1"].description = "Add a Median function, returning a float64."
 	g.ask("H1", "")
 	g.tick()
-	if r.Step != StepPlan || r.Brief != "Add a Median function, returning a float64." || r.Reported {
+	if r.Step != StepWork || r.Brief != "Add a Median function, returning a float64." || r.Reported || r.Session != "S2" {
 		t.Fatalf("resumed run = %+v", r)
 	}
 	if msgs := g.git.messages(); msgs[len(msgs)-1] != "run: brief updated from the issue" {
@@ -1481,7 +1235,6 @@ func TestIssueOf(t *testing.T) {
 // taken over, with the run's title, body and label, and the run goes on.
 func TestAnOpenPRForTheBranchIsTakenOver(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
 	g.gh.existing = 5
 	r := g.opened("H1")
 	if len(g.gh.prs) != 0 {
@@ -1503,7 +1256,6 @@ func TestAnOpenPRForTheBranchIsTakenOver(t *testing.T) {
 // label, and is merged into it once CI is green.
 func TestAGoalsRunIsMergedIntoTheGoalBranch(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
 	g.d.homes["H1"] = &fakeHome{workspace: t.TempDir(), description: "Add a Median function to stats"}
 	if err := g.rn.load(); err != nil {
 		t.Fatal(err)
@@ -1513,15 +1265,7 @@ func TestAGoalsRunIsMergedIntoTheGoalBranch(t *testing.T) {
 		Step: StepSetup, Started: g.now}
 	g.rn.runs["H1"] = r
 	g.tick()
-	g.finish(map[string]string{r.File(PlanFile): "# Plan\n"})
-	g.tick()
-	g.finish(map[string]string{r.File(VerifyFile): "go test ./...\n"})
-	g.tick()
-	g.finish(map[string]string{r.File(TasksFile): twoTasks})
-	g.tick()
-	g.finish(map[string]string{"stats.go": "x"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "x"})
+	g.doAll(r, "# Plan\n")
 	g.tick()
 
 	if r.Step != StepDone {
@@ -1541,7 +1285,6 @@ func TestAGoalsRunIsMergedIntoTheGoalBranch(t *testing.T) {
 // A run with no goal is never merged.
 func TestARunIsNeverMergedByTheRunner(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
 	if r := g.opened("H1"); r.Step != StepDone || len(g.gh.merged) != 0 {
 		t.Errorf("run at %q, merged %v", r.Step, g.gh.merged)
 	}
@@ -1553,11 +1296,8 @@ const decidedPlan = "# Plan\n\nSort, then sweep.\n\n## Decisions\n\n- Even-lengt
 // owner finds out from the description rather than from a bug.
 func TestThePRReportsTheRunsDecisions(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
-	g.plannedWith("H1", decidedPlan)
-	g.finish(map[string]string{"stats.go": "x"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "x"})
+	r := g.started("H1")
+	g.doAll(r, decidedPlan)
 	g.tick()
 	if len(g.gh.prs) != 1 {
 		t.Fatalf("prs = %q\nlog:\n%s", g.gh.prs, g.log.String())
@@ -1572,23 +1312,8 @@ func TestThePRReportsTheRunsDecisions(t *testing.T) {
 
 func TestAPlanWithNoDecisionsSaysSo(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
 	g.opened("H1")
 	if !strings.Contains(g.gh.prs[0], "## Decisions this run made\n\nThe plan recorded no open decisions.\n") {
 		t.Errorf("body:\n%s", g.gh.prs[0])
-	}
-}
-
-// The review may change a decision, but only in the open: a rewrite that
-// drops the section gets the plan's decisions back.
-func TestAReviewThatDropsTheDecisionsKeepsThem(t *testing.T) {
-	g := newRig(t)
-	g.shell.results = []bool{false}
-	g.claude.answers = map[string][]string{"plan": {Begin(PlanFile) + "\n# Plan\n\nSort with slices.SortFunc.\n" + End(PlanFile)}}
-	r := g.plannedWith("H1", decidedPlan)
-	plan, _ := g.rn.read(r, PlanFile)
-	if !strings.Contains(plan, "Sort with slices.SortFunc.") || !strings.Contains(plan, "left this section out") ||
-		!strings.Contains(plan, "- Even-length input: the mean of the two middle values") {
-		t.Errorf("plan.md:\n%s", plan)
 	}
 }

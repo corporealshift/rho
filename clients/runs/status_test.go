@@ -21,35 +21,34 @@ var update = flag.Bool("update", false, "rewrite testdata/status from the builde
 
 var t0 = time.Date(2026, 10, 11, 15, 53, 44, 0, time.UTC)
 
-// recordedRun is a run at its second task of three, one of a goal's, after a
-// failed attempt at the first.
+// recordedRun is a run of a goal's, back at work in its second session for
+// the final review's blocker, after its first session ended paused.
 func recordedRun() Run {
 	return Run{
 		Home: "01M4P8EH2VXBN4WJZ8R8PJ1HKX", Slug: "in-flight-notes-1hkx", Goal: "01M498J1N9D785RFV6AZBRZN7G",
-		Step: StepWork, Task: 1, Attempt: 1, Session: "01M4PFQCAXFW19C4PHD50DSQSM",
-		Since: t0.Add(130 * time.Minute), Fixes: 1, Revisions: 1, PR: 41, PRURL: "https://github.com/o/r/pull/41",
+		Step: StepWork, Session: "01M4PFQCAXFW19C4PHD50DSQSM", FinalReviewed: true,
+		Since: t0.Add(130 * time.Minute),
 		History: []Record{
 			{Step: StepSetup, OK: true, At: t0.Add(time.Second)},
-			{Step: StepPlan, Session: "01M4P8ENR4XCTQT7HMWDVSCWG8", OK: true, At: t0.Add(93 * time.Minute)},
-			{Step: StepPlanReview, OK: true, At: t0.Add(94 * time.Minute)},
-			{Step: StepVerify, Session: "01M4PDT3JY7SDRXF9N2DP7923Y", OK: true, At: t0.Add(125 * time.Minute)},
-			{Step: StepVerifyReview, OK: true, Result: "asked for a revision of verify.sh", At: t0.Add(126 * time.Minute)},
-			{Step: StepWork, Task: 0, Session: "01M4PFKEYY6GEREN9YBJ11GC6D", OK: false,
-				Why: "the session ended paused " + strings.Repeat("and more ", 60), Note: "a long note", At: t0.Add(128 * time.Minute)},
-			{Step: StepWork, Task: 0, Session: "01M4PFQCAXFW19C4PHD50DSQSM", OK: true, At: t0.Add(129 * time.Minute)},
-			{Step: StepCheck, OK: true, Result: "failed", At: t0.Add(130 * time.Minute)},
+			{Step: StepWork, Session: "01M4P8ENR4XCTQT7HMWDVSCWG8", OK: false,
+				Why: "the session ended paused " + strings.Repeat("and more ", 60), Note: "a long note", At: t0.Add(93 * time.Minute)},
+			{Step: StepWork, Session: "01M4PFQCAXFW19C4PHD50DSQSM", OK: true, At: t0.Add(125 * time.Minute)},
+			{Step: StepFinalReview, OK: true, Result: "1 blockers", At: t0.Add(130 * time.Minute)},
 		},
 		Started: t0, Updated: t0.Add(130 * time.Minute),
 	}
 }
 
-// parkedRun is a run waiting at plan-review for Claude, which is not
+// recordedTasks are the run's tasks: its own two, done, and the blocker.
+var recordedTasks = []Task{{Title: "Notes in Room", Done: true}, {Title: "Notes in state", Done: true}, {Title: "Notes survive a restart"}}
+
+// parkedRun is a run waiting at final-review for Claude, which is not
 // answering.
 func parkedRun() Run {
 	r := recordedRun()
-	r.Step, r.Task, r.Attempt, r.Session = StepPlanReview, 0, 0, ""
-	r.History = r.History[:2]
-	r.Since = r.History[1].At
+	r.Step, r.FinalReviewed = StepFinalReview, false
+	r.History = r.History[:3]
+	r.Since = r.History[2].At
 	r.Parked = "You've hit your weekly limit · resets 2pm"
 	return r
 }
@@ -73,26 +72,28 @@ func recordedGoal() Goal {
 const recordedBrief = "# In-Flight notes: data, state and actions (no UI)\n\nAdd the data side.\n"
 
 func TestNewRunStatus(t *testing.T) {
-	s := NewRunStatus(recordedRun(), recordedBrief, []string{"Notes in Room", "Notes in state", "Actions"}, "build the app")
+	s := NewRunStatus(recordedRun(), recordedBrief, recordedTasks, "build the app")
 	if s.Version != StatusVersion || s.Title != "In-Flight notes: data, state and actions (no UI)" ||
-		s.Step != StepWork || s.Task != 2 || len(s.Tasks) != 3 || s.Attempt != 1 ||
-		s.Session != "01M4PFQCAXFW19C4PHD50DSQSM" || s.GoalTitle != "build the app" ||
-		s.PR.Number != 41 || s.Fixes != 1 || s.Revisions != 1 || s.Brief != recordedBrief {
+		s.Step != StepWork || s.Task != 3 || len(s.Tasks) != 3 || s.Tasks[2] != "Notes survive a restart" ||
+		s.Session != "01M4PFQCAXFW19C4PHD50DSQSM" || s.GoalTitle != "build the app" || s.Brief != recordedBrief {
 		t.Fatalf("status = %+v", s)
 	}
-	if len(s.History) != 8 {
+	if len(s.History) != 4 {
 		t.Fatalf("history = %+v", s.History)
 	}
-	failed := s.History[5]
-	if failed.Task != 1 || failed.OK || len(failed.Why) > statusText || !strings.HasSuffix(failed.Why, "…") {
+	failed := s.History[1]
+	if failed.OK || len(failed.Why) > statusText || !strings.HasSuffix(failed.Why, "…") {
 		t.Errorf("failed work row = %+v", failed)
 	}
-	if s.History[1].Task != 0 || s.History[4].Result != "asked for a revision of verify.sh" {
+	if s.History[3].Result != "1 blockers" {
 		t.Errorf("rows = %+v", s.History)
 	}
 	b, _ := json.Marshal(s)
 	if bytes.Contains(b, []byte("a long note")) {
 		t.Error("a note reached the status")
+	}
+	if s := NewRunStatus(parkedRun(), recordedBrief, recordedTasks, ""); s.Task != 0 {
+		t.Errorf("a run not at work has no current task: %d", s.Task)
 	}
 }
 
@@ -131,7 +132,7 @@ func TestARunStatusIsTrimmedToFit(t *testing.T) {
 	r := recordedRun()
 	r.History = nil
 	for i := range maxHistory {
-		r.History = append(r.History, Record{Step: StepCheck, OK: false, Why: strings.Repeat("w", statusText),
+		r.History = append(r.History, Record{Step: StepCI, OK: false, Why: strings.Repeat("w", statusText),
 			Result: strings.Repeat("r", statusText), At: t0.Add(time.Duration(i) * time.Minute)})
 	}
 	full, _ := json.Marshal(NewRunStatus(r, recordedBrief, nil, ""))
@@ -188,24 +189,22 @@ func statuses(t *testing.T, h *fakeHome) []RunStatus {
 
 func TestARunSetsItsStatusAsItGoes(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
-	g.ask("H1", "Add a Median function to stats")
+	r := g.started("H1")
+	g.now = g.now.Add(10 * time.Minute)
+	g.finish(map[string]string{r.File(PlanFile): "# Plan\n", r.File(TasksFile): "- [x] Add Median\n- [ ] Test Median\n", "stats.go": "x"})
+	g.tick() // nudged: one task left
+	all := statuses(t, g.d.homes["H1"])
+	if last := all[len(all)-1]; last.Step != StepWork || last.Task != 2 || len(last.Tasks) != 2 || last.Tasks[1] != "Test Median" {
+		t.Fatalf("status during work = %+v", last)
+	}
+	g.now = g.now.Add(10 * time.Minute)
+	g.finish(map[string]string{r.File(TasksFile): doneTasks})
 	g.tick()
-	r := g.run("H1")
-	steps := []map[string]string{
-		{r.File(PlanFile): "# Plan\n"}, {r.File(VerifyFile): "go test ./...\n"}, {r.File(TasksFile): twoTasks},
-		{"stats.go": "package stats\n"}, {"stats_test.go": "package stats\n"},
-	}
-	for _, files := range steps {
-		g.now = g.now.Add(10 * time.Minute)
-		g.finish(files)
-		g.tick()
-	}
 	if r.Step != StepDone {
 		t.Fatalf("run ended at %q (%s)\nlog:\n%s", r.Step, r.Why, g.log.String())
 	}
 
-	all := statuses(t, g.d.homes["H1"])
+	all = statuses(t, g.d.homes["H1"])
 	for i := 1; i < len(all); i++ {
 		a, _ := json.Marshal(all[i-1])
 		b, _ := json.Marshal(all[i])
@@ -221,32 +220,10 @@ func TestARunSetsItsStatusAsItGoes(t *testing.T) {
 	for _, row := range last.History {
 		seen = append(seen, row.Step)
 	}
-	for _, want := range []Step{StepPlan, StepPlanReview, StepVerify, StepVerifyReview, StepWork, StepFinalReview} {
+	for _, want := range []Step{StepSetup, StepWork, StepFinalReview, StepPR, StepCI, StepReflect} {
 		if !slices.Contains(seen, want) {
 			t.Errorf("history %v has no %s", seen, want)
 		}
-	}
-
-	var second *RunStatus
-	for i := range all {
-		if all[i].Step == StepWork && all[i].Task == 2 && all[i].Session != "" {
-			second = &all[i]
-			break
-		}
-	}
-	if second == nil || len(second.Tasks) != 2 || second.Tasks[1] != "Test Median" {
-		t.Fatalf("no status for the second task's session: %+v", all)
-	}
-	// Since is when the task began, not when its session did.
-	var first *RunStatus
-	for i := range all {
-		if all[i].Step == StepWork && all[i].Task == 2 {
-			first = &all[i]
-			break
-		}
-	}
-	if !first.Since.Equal(second.Since) || second.Since.Before(r.Started) {
-		t.Errorf("since moved within a task: %s then %s", first.Since, second.Since)
 	}
 
 	before := len(g.d.homes["H1"].statuses)
@@ -256,9 +233,9 @@ func TestARunSetsItsStatusAsItGoes(t *testing.T) {
 	}
 }
 
-func TestSinceMovesWithTheStepAndTheTask(t *testing.T) {
+func TestSinceMovesWithTheStep(t *testing.T) {
 	g := newRig(t)
-	r := &Run{Home: "H1", Step: StepWork, Task: 0}
+	r := &Run{Home: "H1", Step: StepWork}
 	g.rn.runs = map[string]*Run{"H1": r}
 	_ = g.rn.save(r)
 	at := r.Since
@@ -268,13 +245,8 @@ func TestSinceMovesWithTheStepAndTheTask(t *testing.T) {
 	if !r.Since.Equal(at) {
 		t.Errorf("a retry moved since")
 	}
-	r.Task = 1
-	_ = g.rn.save(r)
-	if !r.Since.Equal(g.now) {
-		t.Errorf("a new task did not move since")
-	}
 	g.now = g.now.Add(time.Minute)
-	r.Step = StepCheck
+	r.Step = StepFinalReview
 	_ = g.rn.save(r)
 	if !r.Since.Equal(g.now) {
 		t.Errorf("a new step did not move since")
@@ -283,12 +255,9 @@ func TestSinceMovesWithTheStepAndTheTask(t *testing.T) {
 
 func TestAStatusThatCannotBeSetLeavesTheRunMoving(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false}
 	g.d.statusErr = errors.New("daemon says no")
-	r := g.planned("H1")
-	g.finish(map[string]string{"stats.go": "package stats\n"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "package stats\n"})
+	r := g.started("H1")
+	g.doAll(r, "p")
 	g.tick()
 	if r.Step != StepDone {
 		t.Fatalf("run ended at %q (%s)", r.Step, r.Why)
@@ -346,7 +315,7 @@ func TestAGoalSetsItsStatus(t *testing.T) {
 // shape, and the app's tests then say whether it still reads it.
 func TestTheStatusFixtureIsCurrent(t *testing.T) {
 	for name, v := range map[string]any{
-		"run.json":    NewRunStatus(recordedRun(), recordedBrief, []string{"Notes in Room", "Notes in state", "Actions"}, "build the app based on the designs in the design directory"),
+		"run.json":    NewRunStatus(recordedRun(), recordedBrief, recordedTasks, "build the app based on the designs in the design directory"),
 		"goal.json":   NewGoalStatus(recordedGoal(), 10),
 		"parked.json": NewRunStatus(parkedRun(), recordedBrief, nil, ""),
 	} {

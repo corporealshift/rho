@@ -2,25 +2,23 @@
   "version": 1,
   "title": "In-Flight notes: data, state and actions (no UI)",
   "step": "work",
-  "task": 2,
+  "task": 3,
   "tasks": [
     "Notes in Room",
     "Notes in state",
-    "Actions"
+    "Notes survive a restart"
   ],
-  "attempt": 1,
+  "attempt": 0,
   "since": "2026-10-11T18:03:44Z",
   "session": "01M4PFQCAXFW19C4PHD50DSQSM",
   "waiting": false,
   "goal": "01M498J1N9D785RFV6AZBRZN7G",
   "goal_title": "build the app based on the designs in the design directory",
   "pr": {
-    "number": 41,
-    "url": "https://github.com/o/r/pull/41"
+    "number": 0,
+    "url": ""
   },
-  "fixes": 1,
   "ci_fixes": 0,
-  "revisions": 1,
   "history": [
     {
       "step": "setup",
@@ -28,47 +26,22 @@
       "at": "2026-10-11T15:53:45Z"
     },
     {
-      "step": "plan",
+      "step": "work",
       "session": "01M4P8ENR4XCTQT7HMWDVSCWG8",
-      "ok": true,
+      "ok": false,
+      "why": "the session ended paused and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more an…",
       "at": "2026-10-11T17:26:44Z"
     },
     {
-      "step": "plan-review",
-      "ok": true,
-      "at": "2026-10-11T17:27:44Z"
-    },
-    {
-      "step": "verify",
-      "session": "01M4PDT3JY7SDRXF9N2DP7923Y",
+      "step": "work",
+      "session": "01M4PFQCAXFW19C4PHD50DSQSM",
       "ok": true,
       "at": "2026-10-11T17:58:44Z"
     },
     {
-      "step": "verify-review",
+      "step": "final-review",
       "ok": true,
-      "result": "asked for a revision of verify.sh",
-      "at": "2026-10-11T17:59:44Z"
-    },
-    {
-      "step": "work",
-      "task": 1,
-      "session": "01M4PFKEYY6GEREN9YBJ11GC6D",
-      "ok": false,
-      "why": "the session ended paused and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more an…",
-      "at": "2026-10-11T18:01:44Z"
-    },
-    {
-      "step": "work",
-      "task": 1,
-      "session": "01M4PFQCAXFW19C4PHD50DSQSM",
-      "ok": true,
-      "at": "2026-10-11T18:02:44Z"
-    },
-    {
-      "step": "check",
-      "ok": true,
-      "result": "failed",
+      "result": "1 blockers",
       "at": "2026-10-11T18:03:44Z"
     }
   ],

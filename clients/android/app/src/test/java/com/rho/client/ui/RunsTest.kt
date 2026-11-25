@@ -22,9 +22,9 @@ class RunsTest {
 
     @Test
     fun `a skip is offered only at a Claude check`() {
-        assertEquals(listOf("mine", "run:skip"), skipLabels(listOf("mine", "run:plan-review")))
-        assertEquals(listOf("run:skip"), skipLabels(listOf("run:final-review")))
-        assertNull(skipLabels(listOf("run:check", "run:attempt:2/10")))
+        assertEquals(listOf("mine", "run:skip"), skipLabels(listOf("mine", "run:final-review")))
+        assertNull(skipLabels(listOf("run:work")))
+        assertNull(skipLabels(listOf("run:ci-fix", "run:attempt:2/5")))
         assertNull(skipLabels(listOf("run:skip")))
         assertEquals(listOf("goal:skip"), skipLabels(listOf("goal:check", "goal:round:3")))
         // The breakdown writes the briefs, so nothing stands in for it.

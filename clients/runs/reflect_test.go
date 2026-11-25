@@ -31,14 +31,12 @@ func reflectedRun() (Run, map[string][]protocol.Event) {
 	r := Run{Slug: "add-median-abcd", Brief: "Add a Median function to stats.", PRURL: "https://github.com/kyle/x/pull/7",
 		History: []Record{
 			{Step: StepSetup, OK: true},
-			{Step: StepPlan, Session: "S1", OK: true},
-			{Step: StepWork, Task: 0, Session: "S2", Why: "the session committed nothing (session S2)"},
-			{Step: StepWork, Task: 0, Session: "S3", OK: true},
-			{Step: StepCheck, OK: true, Result: "failed", Note: "FAIL TestMedian: got 2, want 2.5"},
+			{Step: StepWork, Session: "S2", Why: "the session ended error (session S2)"},
+			{Step: StepWork, Session: "S3", OK: true},
 			{Step: StepFinalReview, OK: true, Result: "1 blockers", Note: "- Median of an even count: averages the middle two"},
+			{Step: StepCI, OK: true, Result: CIFail, Note: "FAIL TestMedian: got 2, want 2.5"},
 		}}
 	logs := map[string][]protocol.Event{
-		"S1": {assistantTurn("planning"), assistantTurn("done")},
 		"S2": {assistantTurn("a"), assistantTurn("b"), assistantTurn("c")},
 		"S3": append(append([]protocol.Event{assistantTurn("trying")},
 			askClaude("c1", "module:claude", "rho is asking on behalf of a smaller local model that has spent 50 turns", "Sort a copy, not the input: sort.Float64s(slices.Clone(xs)).")...),
@@ -53,10 +51,9 @@ func TestTheDigestTellsTheWholeRun(t *testing.T) {
 	for _, want := range []string{
 		"Add a Median function to stats.",
 		"done: https://github.com/kyle/x/pull/7",
-		"Add Median", // the task list, and the task each work step did
-		"plan: session S1, 2 turns",
-		"work, task 1 (Add Median): session S2, 3 turns: thrown away: the session committed nothing",
-		"check: failed", "FAIL TestMedian: got 2, want 2.5",
+		"Add Median", // the task list
+		"work: session S2, 3 turns: did not work: the session ended error",
+		"ci: fail", "FAIL TestMedian: got 2, want 2.5",
 		"final-review: 1 blockers", "Median of an even count",
 		// Each ask, who asked, after how many turns, and the answer in full.
 		"rho asked for the model after 1 turns", "Sort a copy, not the input: sort.Float64s(slices.Clone(xs)).",
@@ -74,8 +71,8 @@ func TestTheDigestTellsTheWholeRun(t *testing.T) {
 
 func TestAFailedRunSaysWhereItFailed(t *testing.T) {
 	r, logs := reflectedRun()
-	r.PRURL, r.FailedAt, r.Why = "", StepFix, "verify.sh still fails after 10 fixes"
-	if d := Digest(r, "", logs); !strings.Contains(d, "failed at fix: verify.sh still fails after 10 fixes") {
+	r.PRURL, r.FailedAt, r.Why = "", StepCIFix, "CI still fails after 5 fixes"
+	if d := Digest(r, "", logs); !strings.Contains(d, "failed at ci-fix: CI still fails after 5 fixes") {
 		t.Errorf("the digest does not say how the run ended:\n%s", d)
 	}
 }
@@ -83,7 +80,7 @@ func TestAFailedRunSaysWhereItFailed(t *testing.T) {
 func TestTheDigestIsBounded(t *testing.T) {
 	r, logs := reflectedRun()
 	for i := range 300 {
-		r.History = append(r.History, Record{Step: StepCheck, OK: true, Result: "failed", Note: strings.Repeat("x", maxNote)})
+		r.History = append(r.History, Record{Step: StepCI, OK: true, Result: CIFail, Note: strings.Repeat("x", maxNote)})
 		logs["S3"] = append(logs["S3"], askClaude("k"+string(rune('a'+i%26)), "", "q", strings.Repeat("y", 5000))...)
 	}
 	d := Digest(r, strings.Repeat("- [ ] t\n", 5000), logs)
@@ -110,16 +107,12 @@ func TestReflectPrompt(t *testing.T) {
 	}
 }
 
-// reflectingRun takes a run with two tasks to its reflection, and leaves it
-// there.
+// reflectingRun takes a run to its reflection, and leaves it there.
 func (g *rig) reflectingRun(id string) *Run {
 	g.t.Helper()
 	g.holdReflect = true
-	g.shell.results = []bool{false} // verify-review's run before any work fails, as it should
-	r := g.planned(id)
-	g.finish(map[string]string{"stats.go": "package stats\n"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "package stats\n"})
+	r := g.started(id)
+	g.doAll(r, "p")
 	g.tick()
 	if r.Step != StepReflect {
 		g.t.Fatalf("run at %q, want reflect\nlog:\n%s", r.Step, g.log.String())
@@ -127,16 +120,18 @@ func (g *rig) reflectingRun(id string) *Run {
 	return r
 }
 
+// The reflection is one more prompt to the run's session.
 func TestARunReflectsBeforeItEnds(t *testing.T) {
 	g := newRig(t)
 	r := g.reflectingRun("H1")
-	id, s := g.d.last()
-	if s.turns != DefaultReflectTurns || len(s.goals) != 0 {
-		t.Errorf("reflection session: %d turns, goals %q", s.turns, s.goals)
+	s := g.d.sessions["S1"]
+	if len(g.d.order) != 1 || len(s.goals) != 1 {
+		t.Errorf("sessions %d, goals %q", len(g.d.order), s.goals)
 	}
-	for _, want := range []string{"How the run went", "Add a Median function to stats", "Test Median", "check: passed", "memory.save"} {
-		if !strings.Contains(s.prompts[0], want) {
-			t.Errorf("the reflection's prompt lacks %q:\n%s", want, s.prompts[0])
+	p := s.prompts[len(s.prompts)-1]
+	for _, want := range []string{"How the run went", "Add a Median function to stats", "Test Median", "final-review: 0 blockers", "memory.save"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the reflection's prompt lacks %q:\n%s", want, p)
 		}
 	}
 	start := r.Start
@@ -149,21 +144,23 @@ func TestARunReflectsBeforeItEnds(t *testing.T) {
 	if len(g.git.resets) == 0 || g.git.resets[len(g.git.resets)-1] != start {
 		t.Errorf("resets = %q, want the worktree back at %s", g.git.resets, start)
 	}
-	if last := r.History[len(r.History)-1]; last.Step != StepReflect || last.Session != id {
+	if last := r.History[len(r.History)-1]; last.Step != StepReflect || last.Session != "S1" {
 		t.Errorf("the reflection is not in the history: %+v", last)
+	}
+	if s.state != protocol.StateCompleted {
+		t.Errorf("the session was left %s", s.state)
 	}
 }
 
 func TestAReflectionThatFailsStillEndsTheRun(t *testing.T) {
 	g := newRig(t)
 	r := g.reflectingRun("H1")
-	_, s := g.d.last()
-	s.state = protocol.StateBlocked
+	g.d.sessions["S1"].state = protocol.StateError
 	g.tick()
 	if r.Step != StepDone || r.FailedAt != "" {
 		t.Errorf("run = %q, failed at %q\nlog:\n%s", r.Step, r.FailedAt, g.log.String())
 	}
-	if n := len(g.d.order); n != 6 {
+	if n := len(g.d.order); n != 1 {
 		t.Errorf("%d sessions: a reflection is never retried", n)
 	}
 }
@@ -171,9 +168,9 @@ func TestAReflectionThatFailsStillEndsTheRun(t *testing.T) {
 func TestAFailedRunReflectsAndStaysFailed(t *testing.T) {
 	g := newRig(t)
 	g.holdReflect = true
-	r := g.planned("H1")
-	for range sessionTries {
-		g.finish(map[string]string{"stats.go": "x", r.File(VerifyFile): "exit 0\n"})
+	r := g.started("H1")
+	for range sessionTries * (maxNudges + 1) {
+		g.finish(nil)
 		g.tick()
 	}
 	if r.Step != StepReflect || r.FailedAt != StepWork {
@@ -182,20 +179,13 @@ func TestAFailedRunReflectsAndStaysFailed(t *testing.T) {
 	if !strings.Contains(g.log.String(), "failed at work") {
 		t.Errorf("the failure is not logged when it happens:\n%s", g.log.String())
 	}
-	_, s := g.d.last()
-	if !strings.Contains(s.prompts[0], "failed at work") || !strings.Contains(s.prompts[0], "thrown away") {
-		t.Errorf("the digest does not say how the run failed:\n%s", s.prompts[0])
+	s := g.d.sessions["S1"]
+	if p := s.prompts[len(s.prompts)-1]; !strings.Contains(p, "failed at work") || !strings.Contains(p, "did not work") {
+		t.Errorf("the digest does not say how the run failed:\n%s", p)
 	}
 	g.finish(nil)
 	g.tick()
-	if r.Step != StepFailed || r.FailedAt != StepWork || !strings.Contains(r.Why, "verify.sh") {
+	if r.Step != StepFailed || r.FailedAt != StepWork || !strings.Contains(r.Why, "is not written") {
 		t.Errorf("run = %+v", r)
-	}
-}
-
-func TestReflectTurnsDefault(t *testing.T) {
-	c, err := LoadConfig(t.TempDir())
-	if err != nil || c.ReflectTurns != DefaultReflectTurns {
-		t.Errorf("ReflectTurns = %d, %v", c.ReflectTurns, err)
 	}
 }
