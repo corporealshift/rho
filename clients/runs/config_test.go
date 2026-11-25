@@ -6,17 +6,17 @@ import (
 	"testing"
 )
 
-// Sessions have no turn cap unless one is configured: caps of 50 and 100
-// failed a live run whose sessions were still working. A configured cap is
+// The run's session has no turn cap unless one is configured: caps of 50 and
+// 100 failed a live run whose sessions were still working. A configured cap is
 // kept, and a negative one means none.
-func TestTurnCaps(t *testing.T) {
+func TestTurnCap(t *testing.T) {
 	tests := []struct {
 		name, json string
-		plan, work int
+		turns      int
 	}{
-		{"none configured", "", 0, 0},
-		{"configured", `{"plan_turns": 40, "work_turns": 150}`, 40, 150},
-		{"negative", `{"plan_turns": -1, "work_turns": -5}`, 0, 0},
+		{"none configured", "", 0},
+		{"configured", `{"turns": 400}`, 400},
+		{"negative", `{"turns": -1}`, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -33,9 +33,18 @@ func TestTurnCaps(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if c.PlanTurns != tt.plan || c.WorkTurns != tt.work {
-				t.Errorf("plan %d, work %d; want %d, %d", c.PlanTurns, c.WorkTurns, tt.plan, tt.work)
+			if c.Turns != tt.turns {
+				t.Errorf("turns %d, want %d", c.Turns, tt.turns)
 			}
 		})
+	}
+}
+
+func TestTheSessionTakesTheTurnCap(t *testing.T) {
+	g := newRig(t)
+	g.rn.Cfg.Turns = 300
+	g.started("H1")
+	if s := g.d.sessions["S1"]; s.turns != 300 {
+		t.Errorf("turns = %d", s.turns)
 	}
 }

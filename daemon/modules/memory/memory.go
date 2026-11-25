@@ -25,8 +25,8 @@ const SaveInstructions = "Save a memory when the user corrects you, confirms an 
 const DefaultCuratorMaxPerPass = 3
 
 // NoCuratorLabel marks a session the curator leaves alone: no pass, and no
-// in-progress memory. The runner puts it on its step sessions, each one try
-// of one task, and has the run reflect as a whole instead
+// in-progress memory. The runner puts it on a run's session, and has the run
+// reflect as a whole instead
 // (docs/specs/2026-10-11-run-reflection-design.md).
 const NoCuratorLabel = "memory:no-curator"
 

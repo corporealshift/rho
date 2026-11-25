@@ -9,52 +9,44 @@ import (
 // it, and what came of it (docs/specs/2026-10-11-run-reflection-design.md).
 func TestARunKeepsItsHistory(t *testing.T) {
 	g := newRig(t)
-	g.shell.results = []bool{false, false, true} // before work, then a failing check, then a passing one
 	g.claude.answers["final"] = []string{"```json\n{\"blockers\":[{\"title\":\"Median of an even count\",\"detail\":\"averages the middle two\"}],\"notes\":[]}\n```"}
-	r := g.planned("H1")
-	g.finish(map[string]string{"stats.go": "x"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "x"})
-	g.tick() // the check fails: fix
-	g.finish(map[string]string{"stats.go": "y"})
-	g.tick() // the check passes, the final review blocks: work on task 3
-	g.finish(map[string]string{"stats.go": "z"})
-	g.tick() // the check passes, pr, ci
+	g.gh.polls = []poll{failing}
+	r := g.started("H1")
+	g.doAll(r, "p")
+	g.tick() // the final review blocks: work again
+	g.finish(map[string]string{r.File(TasksFile): doneTasks + "- [x] Median of an even count\n"})
+	g.tick() // pr, ci fails: ci-fix
+	g.finish(map[string]string{"stats.go": "gofmt'd"})
+	g.tick() // push, ci passes
 
 	var steps []string
 	for _, h := range r.History {
 		steps = append(steps, string(h.Step))
 	}
-	want := "setup plan plan-review verify verify-review tasks work work check fix check final-review work check pr ci"
-	if got := strings.Join(steps, " "); !strings.HasPrefix(got, want) {
-		t.Fatalf("history =\n %s\nwant it to start\n %s", got, want)
+	want := "setup work final-review work pr ci ci-fix push ci reflect"
+	if got := strings.Join(steps, " "); got != want {
+		t.Fatalf("history =\n %s\nwant\n %s", got, want)
 	}
 	h := r.History
-	if h[1].Session != "S1" || !h[1].OK || h[2].Session != "" {
-		t.Errorf("plan records: %+v, %+v", h[1], h[2])
+	if h[1].Session != "S1" || !h[1].OK || h[2].Session != "" || h[6].Session != "S1" {
+		t.Errorf("session records: %+v, %+v, %+v", h[1], h[2], h[6])
 	}
-	if h[6].Task != 0 || h[7].Task != 1 || h[12].Task != 2 || h[7].Session != "S5" {
-		t.Errorf("work records: %+v, %+v, %+v", h[6], h[7], h[12])
+	if !strings.Contains(h[2].Note, "Median of an even count") || h[2].Result != "1 blockers" {
+		t.Errorf("final review: %+v", h[2])
 	}
-	if !strings.Contains(h[8].Note, "FAIL TestMedian") || h[10].Note != "" {
-		t.Errorf("check notes: %q, %q", h[8].Note, h[10].Note)
-	}
-	if !strings.Contains(h[11].Note, "Median of an even count") {
-		t.Errorf("final review note: %q", h[11].Note)
-	}
-	if h[8].Result != "failed" || h[10].Result != "passed" || h[11].Result != "1 blockers" || h[15].Result != CIPass {
-		t.Errorf("results: check %q, check %q, final review %q, ci %q", h[8].Result, h[10].Result, h[11].Result, h[15].Result)
+	if h[5].Result != CIFail || !strings.Contains(h[5].Note, "gofmt -l found stats.go") || h[8].Result != CIPass {
+		t.Errorf("ci records: %+v, %+v", h[5], h[8])
 	}
 }
 
 func TestAFailedTryIsInTheHistory(t *testing.T) {
 	g := newRig(t)
-	r := g.planned("H1")
-	g.finish(map[string]string{"stats.go": "x", r.File(VerifyFile): "exit 0\n"})
+	r := g.started("H1")
+	g.d.sessions["S1"].state = "error"
 	g.tick()
 	last := r.History[len(r.History)-1]
-	if last.Step != StepWork || last.OK || last.Session != "S4" || !strings.Contains(last.Why, "changed verify.sh") {
-		t.Errorf("the thrown-away try: %+v", last)
+	if last.Step != StepWork || last.OK || last.Session != "S1" || !strings.Contains(last.Why, "the session ended error") {
+		t.Errorf("the failed try: %+v", last)
 	}
 }
 

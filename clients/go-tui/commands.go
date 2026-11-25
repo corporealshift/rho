@@ -190,7 +190,7 @@ func goalLabels(current []string) []string {
 // claudeGates are the run steps where the runner asks Claude, which /skip
 // can pass (docs/specs/2026-10-13-claude-park-and-skip-design.md). A goal's
 // only one is its check: its breakdown writes the briefs.
-var claudeGates = map[string]bool{"plan-review": true, "verify-review": true, "revise": true, "replan-review": true, "final-review": true}
+var claudeGates = map[string]bool{"final-review": true}
 
 // skipLabels is a home's labels once /skip asks the runner to pass the Claude
 // gate its run or goal is at: run:skip or goal:skip in place of its other

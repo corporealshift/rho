@@ -23,13 +23,13 @@ failures.
   check for open tasks, failed checks, a failing test command, and uncommitted changes.
   When a goal is set, a judge with a fresh context checks that too. Any objection sends
   the agent back to work.
-- **It takes work all the way to a merged PR.** `rho runner` puts each brief through
-  fixed steps: plan, write the check (`verify.sh`) before any code, tasks, fixes until the
-  check passes, a pull request, and fixes until CI is green. The model never has to
-  remember the workflow, because each step is its own short session. A goal is broader:
-  rho splits it into briefs and runs them in rounds until a check finds the goal met.
-- **The local model does the bulk of the work; Claude reviews.** Claude reviews the plan,
-  the check and the finished work. It also steps in when a session stalls, and it can run
+- **It takes work all the way to a merged PR.** `rho runner` gives each brief one
+  session, which plans, writes its tasks and does them; then Claude reviews the work, and
+  the runner opens the PR and sends CI failures back to the session until CI is green.
+  A goal is broader: rho splits it into briefs and runs them in rounds until a check
+  finds the goal met.
+- **The local model does the bulk of the work; Claude reviews.** Claude reviews the
+  finished work before it becomes a PR. It also steps in when a session stalls, and it can run
   your tests to see the failure for itself. So your Claude allowance goes on a few
   judgment calls, and the local model does the many turns of work.
 - **Sessions live in the daemon, not the terminal.** Close the terminal and the work goes
@@ -148,9 +148,7 @@ Then set up rho.
 
 ```json
 {
-  "work_turns": 130,
-  "goal_rounds": 10,
-  "effort": { "brief": "medium", "plan": "medium", "tasks": "medium", "verify": "medium", "reflect": "low" }
+  "goal_rounds": 10
 }
 ```
 
@@ -164,23 +162,17 @@ Why these values:
   finished within 42 turns, but about one in five ran past 150. The long ones we looked
   at closely were stuck on one thing an outside look fixed: a test asserting the wrong
   thing, or failure output cut off by `| tail`. At 50 turns rho asks Claude what's going
-  wrong, and asks again at 100. The model keeps working meanwhile. In a run, if Claude
-  answers that the plan cannot work, the runner stops the session and plans the run
-  again from what Claude found.
+  wrong, and asks again at 100. The model keeps working meanwhile.
 - **`claude.commands`** lets Claude run your build and tests. Name the commands your
   projects use.
-- **Turn cap: `work_turns: 130`.** Each work session gets two rounds of help before the
-  cap. A session that hits it is retried once from a clean start. If it fails again, the
-  goal re-plans that work, usually as smaller runs.
+- **No turn cap.** A run is one session doing the whole brief, so a cap sized for one
+  task would cut it short. Set `turns` to cap a run's session over the whole run.
 - **Rounds: `goal_rounds: 10`.** When one run fails, the rest of its round is dropped and
   the goal re-plans. With 10 rounds, a goal can recover from a few failures overnight
   without stopping to wait for you.
-- **Effort: `medium` for the planning steps.** With no effort set, Strata's Qwen3.8
-  template thinks at `xhigh`. That is right for writing code, but a plan or verify
-  session on it wrote 64K to 122K tokens, mostly thinking, and took one to three hours
-  against five to ten minutes on Qwen3.6. Work, fix and ci-fix are left out of the map,
-  so they keep the server's default. A goal's or run's home with an effort of its own
-  overrides the map for every session under it.
+- **Effort: the server's default.** A run's session plans and writes code in one go, so
+  it keeps the server's default. Set `effort` to change it for every run, or give a
+  run's or goal's home an effort of its own with `/effort`.
 - **`command_timeout: 900`** gives an Android or Rust build time to finish.
 
 Runs and goals need the `claude` CLI on PATH, logged in to Claude Code. A run never

@@ -5,375 +5,136 @@ import (
 	"strings"
 )
 
-// expectation is how every step that settles an open behavior settles it
-// (docs/specs/2026-10-04-run-decisions-design.md). In a live run the plan
-// review chose the literal reading of a brief over what callers would expect,
-// and the run failed on exactly that.
+// expectation is how every behavior the brief leaves open is settled
+// (docs/specs/2026-10-04-run-decisions-design.md). In a live run a review
+// chose the literal reading of a brief over what callers would expect, and the
+// run failed on exactly that.
 const expectation = "When the brief leaves a behavior open, choose what the people who use this would expect, not the narrowest reading of the brief's words."
 
 // DecisionsHeading heads the plan's section of open behaviors and what was
 // chosen for each. The runner copies the section into the pull request.
 const DecisionsHeading = "## Decisions"
 
-// planningOnly is told to every step that writes one of the run's files.
-func planningOnly(r Run, name string) string {
-	return fmt.Sprintf("\n- Write only %s, and the run's map, %s. Change no other file: the work itself belongs to later steps, and the runner throws away a session that changes anything else.", r.File(name), r.File(MapFile))
-}
+// rules go at the end of the session's first prompt. They hold for every
+// later prompt too, which says so.
+func rules() string {
+	return `
+## Rules for this run
 
-// draftInFile is told to the steps that think hardest before they write. A
-// plan session drafted its whole plan in thinking, grepped, and drafted it
-// again, four times over (docs/specs/2026-10-17-plan-in-the-file-design.md).
-func draftInFile(path string) string {
-	return fmt.Sprintf("Work it out in %s, not in your thinking. Write a first draft as soon as you know enough to, then check what you are unsure of and improve the draft with edits. A long session is summarized, and a summary keeps only what is in a file, so whatever you work out only in your thinking you may have to work out again.", path)
-}
-
-// keepMap is told to every planning step. A plan session read the same 25
-// files three times over, once after each summary, because what it found was
-// only in the conversation (docs/specs/2026-10-17-run-map-design.md).
-func keepMap(r Run) string {
-	return fmt.Sprintf(`## The map of the code
-
-%s is the run's map of the code: the files involved, a line or two on what each holds and why it matters, the types, functions and tests that already exist, and the project docs that set rules. It is notes, not the plan. If it exists, start from it and read only what you still need. If it does not, start it.
-
-Add to it as you read, each time you learn something a later step would otherwise have to find again: a path, a signature, where a thing is called from. A long session is summarized, and a summary keeps only what is in a file, so a file you read and did not note you may have to read again. Correct anything in it that turns out to be wrong.
-`, r.File(MapFile))
-}
-
-// rules go at the end of every session's prompt. The runner enforces the
-// first one; the others are what an unattended session needs to be told.
-func rules(r Run) string {
-	return fmt.Sprintf(`
-## Rules for this session
-
-- This session does one step of an automated run. Do that step and nothing else; later steps have their own sessions.
-- Never create, edit, rename or delete %s. The runner checks, and throws away any session that touches it.
-- Do not push, and do not open a pull request. The runner does both at the end.
+- Do not push, and do not open a pull request. The runner does both.
 - Nobody is watching, so there is no one to ask. If you are stuck on something, look it up first: web.search finds documentation and answers, and web.fetch reads a page. If you have tried that and still cannot settle it, ask Claude with claude.ask, saying what you tried and what you are choosing between.
-- Commit your work before you finish.
-`, r.File(VerifyFile))
+- Commit your work as you go, and leave nothing uncommitted when you end your turn.
+`
 }
 
 // maxTranscript is how much of the home's conversation a brief is written
 // from, taken from the end.
 const maxTranscript = 20000
 
-// BriefPrompt asks for brief.md, written from the home's conversation.
-func BriefPrompt(r Run, transcript string) string {
-	if len(transcript) > maxTranscript {
-		transcript = "(earlier conversation cut)\n\n" + transcript[len(transcript)-maxTranscript:]
+// WorkPrompt is the session's first prompt: the whole run's work. transcript
+// is the home's conversation, for a run given no brief, which the session
+// writes first.
+func WorkPrompt(r Run, transcript string) (prompt, goal string) {
+	var brief string
+	if r.Brief != "" {
+		brief = fmt.Sprintf("The brief is in %s: read it first.", r.File(BriefFile))
+	} else {
+		if len(transcript) > maxTranscript {
+			transcript = "(earlier conversation cut)\n\n" + transcript[len(transcript)-maxTranscript:]
+		}
+		brief = fmt.Sprintf(`There is no brief yet, so write it first, from the conversation at the end of this message, to %s. The brief says what is to be built or changed, and what done looks like, in the owner's own terms: what they asked for, what they ruled out, and anything they said about how it should behave. Keep it short, do not add requirements the owner did not state, and commit it.`, r.File(BriefFile))
 	}
-	return fmt.Sprintf(`Write the brief for an automated run, from the conversation below.
+	prompt = fmt.Sprintf(`You are doing an automated run in this worktree, on the branch %[1]s, from %[2]s. It ends in a pull request, which the runner opens once Claude has reviewed your work.
 
-The brief says what is to be built or changed, and what done looks like, in the owner's own terms: what they asked for, what they ruled out, and anything they said about how it should behave. It does not plan how to do it; a later step does that. Keep it short, and do not add requirements the owner did not state.
+%[3]s
 
-Write it to %s. Then start the run's map of the code, %s, for the steps that plan the work: look up the files and code the brief touches, and note each one with a line on what it holds and why it matters, the tests that cover it, and the project docs that set rules for it. Keep the code out of the brief itself. Commit both with the message "run: brief".
+Work in this order:
 
-## The conversation
+1. **Plan.** Write %[4]s: how the brief will be met and why that fits this codebase, the files to change, the order, the behaviors the tests must show, and the risks. Read the code it needs first, in proportion to the change. End it with a "%[5]s" section: one short paragraph for each behavior the brief leaves open that someone using the result could notice, saying what you chose, the alternative, and why. If the brief settles everything, say so in one line. The owner reads that section in the pull request. %[6]s Commit the plan.
+
+2. **Tasks.** Write %[7]s as a checklist of the tasks that carry out the plan, each a coherent chunk of work that ends in a commit, with indented lines saying what it covers and the tests it writes:
+
+   - [ ] Add the cache type
+     A read-through cache in reader/cache.go with get and put. Tests: getReturnsWhatPutStored, getMissesAnUnknownKey.
+
+   Commit it.
+
+3. **Work.** Do the tasks in order. For each: write the code and its tests, build and run the tests, commit with a message saying what the task did, and tick its box in %[7]s ("- [x]") in the same commit.
+
+4. **Finish.** When every task is ticked, run the project's full build and tests the way its CI does (read .github/workflows or the like, if there is one), fix what fails, commit, and end your turn.
+
+If %[4]s and %[7]s already exist on the branch, an earlier session started this run: read them and the branch's log (`+"`git log origin/%[2]s..HEAD`"+`), and carry on from the first unticked task rather than starting again.
+
+Do what the brief asks, and nothing more.
+%[8]s%[9]s`, r.Branch, r.Base, brief, r.File(PlanFile), DecisionsHeading, expectation, r.File(TasksFile), rules(), conversation(r, transcript))
+	goal = workGoal(r)
+	return prompt, goal
+}
+
+// conversation is the home's conversation, for a run given no brief.
+func conversation(r Run, transcript string) string {
+	if r.Brief != "" {
+		return ""
+	}
+	return "\n## The conversation\n\n" + transcript + "\n"
+}
+
+// workGoal is what the session's work is judged against.
+func workGoal(r Run) string {
+	return fmt.Sprintf("%s and %s are written, every task in %s is ticked, and the work is committed with the project's build and tests passing.",
+		r.File(PlanFile), r.File(TasksFile), r.File(TasksFile))
+}
+
+// ContinuePrompt asks the session to carry on with the work after it ended
+// its turn without finishing it, or after a failed try. missing says what is
+// not done.
+func ContinuePrompt(r Run, missing string) (prompt, goal string) {
+	prompt = fmt.Sprintf(`The run is not done: %s
+
+Carry on from where the work stands: %s, %s and `+"`git log origin/%s..HEAD`"+` say how far it got. Tick each task in %s as you finish it, commit as you go, and end your turn when every task is ticked and the build and tests pass.`,
+		missing, r.File(PlanFile), r.File(TasksFile), r.Base, r.File(TasksFile))
+	return prompt, workGoal(r)
+}
+
+// BlockersPrompt asks the session to do what the final review found. The
+// runner has already added each blocker to tasks.md, unticked.
+func BlockersPrompt(r Run, blockers []Blocker) (prompt, goal string) {
+	var b strings.Builder
+	for _, bl := range blockers {
+		fmt.Fprintf(&b, "- **%s**: %s\n", strings.TrimSpace(bl.Title), strings.TrimSpace(bl.Detail))
+	}
+	prompt = fmt.Sprintf(`Claude reviewed the work against the brief, and found these blockers:
 
 %s
-%s%s`, r.File(BriefFile), r.File(MapFile), transcript, rules(r), planningOnly(r, BriefFile))
+The runner has added each one to %s as an unticked task. Do them the way you did the others: fix the code and its tests, build and test, commit, and tick the task. End your turn when every task is ticked and the build and tests pass.
+
+%s The rules from the first message still hold.`, b.String(), r.File(TasksFile), expectation)
+	return prompt, workGoal(r)
 }
 
-// PlanOutline is what plan.md holds when a plan session starts: the runner
-// writes it, and the session fills it in a section at a time. Written whole
-// at the end, a plan ran to 29 KB of type designs and code, after an hour of
-// reading (docs/specs/2026-10-18-plan-outline-design.md).
-const PlanOutline = `# Plan
-
-## Approach
-<!-- One paragraph: how the brief will be met, and why that fits this codebase. -->
-
-## Files
-<!-- One line for each file to create or change, saying what changes in it. What a file already holds belongs in the map: point there. -->
-
-## Order
-<!-- A short numbered list. Each step leaves the build passing. -->
-
-## Testing
-<!-- One line for each behavior the tests must show, and the kind of test. Not test code: the verify step names the tests. -->
-
-## Risks
-<!-- One line for each thing that could go wrong or is uncertain, and what the work does about it. -->
-
-` + DecisionsHeading + `
-<!-- Fill this in first, from the brief alone. One short paragraph for each behavior the brief leaves open that someone using the result could notice. -->
-`
-
-// PlanPrompt asks for plan.md, filled in from the outline the runner wrote.
-func PlanPrompt(r Run) string {
-	return fmt.Sprintf(`Read the brief in %[1]s, then plan the work in %[2]s.
-
-%[2]s already holds the plan's outline: its headings, each with a note on what goes under it. Fill it in a section at a time, replacing each note with one edit as soon as you know what goes there. Do not draft the whole plan before writing the first section. A long session is summarized, and a summary keeps only what is in a file, so whatever you work out only in your thinking you may have to work out again.
-
-Go in this order:
-1. "%[3]s", from the brief alone, before you read any code. One entry for each behavior the brief leaves open that someone using the result could notice: the question, what the plan chooses, the alternative, and why the choice is what users would expect, in a short paragraph. Choices about how the code is written do not go there. If the brief settles every behavior the plan touches, say so in one line. The owner reads this section in the pull request, and changes a decision there if they disagree. It stays the last section.
-2. Read the code the plan needs, adding to the map as you go (below).
-3. Approach, Files, Order, Testing and Risks, each as soon as you know it.
-4. Read the plan through once, correct what is wrong, and commit it, with the map, with the message "run: plan".
-
-Read in proportion to the change: only what the plan needs, and of a long file only the part you need (find it with grep -n, then read with an offset and a limit). The sessions that do the work read the code they change, so the plan does not need its details.
-
-Keep the plan to about two pages. Write no code, signatures or class designs: the work sessions write those. Where a section would only repeat the brief or the map, point to it instead.
-
-%[4]s
-
-%[5]s
-%[6]s
-Plan exactly what the brief asks for, and nothing more.
-%[7]s%[8]s`, r.File(BriefFile), r.File(PlanFile), DecisionsHeading, expectation, keepMap(r),
-		replanned(r, fmt.Sprintf("Work already committed on this branch stays: see it with `git log origin/%s..HEAD`, and plan only what remains. The old plan has been replaced by the outline, and is in the branch's history.", r.Base)),
-		rules(r), planningOnly(r, PlanFile))
-}
-
-// replanned tells a planning step that the run's last plan could not be
-// carried out, and where what was found is written
-// (docs/specs/2026-10-12-run-replan-design.md). It is empty for a run that
-// has not been re-planned.
-func replanned(r Run, then string) string {
-	if r.Replans == 0 {
-		return ""
-	}
-	return fmt.Sprintf("\n## This run is being planned again\n\nThe run was planned before, and that plan could not be carried out. %s says what was found: read it first, and plan around it rather than repeating it. %s\n",
-		r.File(FindingsFile), then)
-}
-
-// TasksPrompt asks for tasks.md. The check is written first, so the tasks can
-// carry every test it names: a test no task was given was left to the fix
-// session, which in one run spent six hours writing six of them from nothing
-// (docs/specs/2026-10-09-verify-before-tasks-design.md).
-func TasksPrompt(r Run) string {
-	return fmt.Sprintf(`Read the brief in %[1]s and the plan in %[2]s, then break the plan into tasks.
-
-Write %[3]s as a checklist of 3 to 8 tasks that together carry out the plan. Each task is a coherent chunk of work that ends in a commit: bigger than a single edit, much smaller than the whole plan. A separate session does each task, reading only the brief, the plan and its own entry, so each must stand on its own.
-
-Read the check, %[4]s, too. It is what defines done for the run, and the tests it names are fixed. Every test it names that does not exist yet must be written by exactly one task, and that task's entry names it, under the exact name %[4]s uses, so the session doing the task writes it. A test no task names is left to nobody. Tests that already exist need no task.
-
-Write each task as a checkbox line, with indented lines under it saying what it covers and how you will know it is done:
-
-- [ ] Add the cache type
-  A read-through cache in reader/cache.go with get and put. Tests: CacheTest.getReturnsWhatPutStored, CacheTest.getMissesAnUnknownKey.
-
-Keep each entry to a few lines like these: what the task covers, the files, and the tests it writes. Write no code, signatures or class designs: the session doing the task reads the plan and the map, and writes the code.
-
-%[8]s
-
-%[9]s
-Commit it, with the map, with the message "run: tasks".
-%[7]s%[5]s%[6]s`, r.File(BriefFile), r.File(PlanFile), r.File(TasksFile), r.File(VerifyFile), rules(r), planningOnly(r, TasksFile),
-		replanned(r, fmt.Sprintf("Work already committed on this branch stays: see it with `git log origin/%s..HEAD`. Replace %s with tasks for only the work that remains, all unticked.", r.Base, r.File(TasksFile))),
-		draftInFile(r.File(TasksFile)), keepMap(r))
-}
-
-// VerifyPrompt asks for verify.sh. It is the one session allowed to write it.
-// It comes before the tasks, which are then written to carry its tests.
-func VerifyPrompt(r Run) string {
-	return fmt.Sprintf(`Read the brief in %[1]s and the plan in %[2]s, then write the check that proves the brief is done.
-
-Write %[3]s: a bash script that exits 0 only when the brief is done, and non-zero otherwise. It runs from the repository root with bash, on Windows under Git Bash. Write it the way CI is written:
-- build, and run what the repository's CI runs: read its CI configuration, such as .github/workflows, if it has one;
-- run, by name, the tests that prove what the brief asks for: roughly one for each thing it asks for, not one for each detail of how it is built. Fail if any of them fails or did not run at all. Most test runners pass when a name matches no test, so check their output for each named test passing. Above each one, say in a comment what that test must show: the tasks are written from this script, and the session that writes the test reads that comment;
-- never require a kind of test the brief or the plan rules out or says is not needed: if the brief says UI tests are not required, name none;
-- name the cheapest test that shows the behavior: a test of the logic over a test driven through the UI, unless the brief asks for the UI test;
-- where a named test also shows a decision from the plan's "%[4]s" section, name the decision in the comment above it. Do not add a test only to pin a decision: the owner reviews the decisions in the pull request;
-- check anything else the brief requires by running it, as a user or a test would.
-
-%[5]s
-
-Check behavior, never the text of the code. Do not grep source files for function names, strings or patterns, count tests, or check that files exist: those checks dictate how the work is written, and fail correct work that is written differently. A test of the new behavior is what proves it.
-
-Use "set -euo pipefail". It must fail now, before the work is done, unless the brief is already met: a check that passes on untouched code proves nothing. The named tests, which do not exist yet, are what make it fail.
-
-%[7]s
-
-%[8]s
-This script is the definition of done for the whole run. Once it is committed, only the runner may change it. Commit it, with the map, with the message "run: verify".
-%[6]s
-## Rules for this session
-
-- This session does one step of an automated run. Write the script and nothing else.
-- Write only %[3]s, and the run's map, %[9]s. Change no other file: do not write the feature or its tests, which belong to later steps, and the runner throws away a session that changes anything else.
-- Do not push, and do not open a pull request.
-- Nobody is watching, so there is no one to ask. If you are stuck on something, look it up first: web.search finds documentation and answers, and web.fetch reads a page. If you have tried that and still cannot settle it, ask Claude with claude.ask, saying what you tried and what you are choosing between.
-- Commit your work before you finish.
-`, r.File(BriefFile), r.File(PlanFile), r.File(VerifyFile), DecisionsHeading, expectation,
-		replanned(r, fmt.Sprintf("Name no test that needs what it says cannot be done. If %s already exists, write it again from the new plan.", r.File(VerifyFile))),
-		draftInFile(r.File(VerifyFile)), keepMap(r), r.File(MapFile))
-}
-
-// WorkPrompt asks for one task, and gives the goal it is judged against.
-func WorkPrompt(r Run, i, n int, t Task) (prompt, goal string) {
-	detail := strings.TrimSpace(t.Detail)
-	if detail != "" {
-		detail = "\n\n" + detail
-	}
-	prompt = fmt.Sprintf(`Do task %d of %d of this run:
-
-**%s**%s
-
-For context, the brief is %s, the plan is %s, the whole task list is %s and the map of the code is %s. Do this task and only this task: later tasks belong to later sessions. The run is done when %s passes, so read it. This task's entry names the tests it writes: write each under exactly that name, and make it show what the comment above it in the check says. Build and test what you change. Commit with a message that says what the task did. Do not edit %s; the runner ticks the box when you finish.
-%s%s%s`, i+1, n, t.Title, detail, r.File(BriefFile), r.File(PlanFile), r.File(TasksFile), r.File(MapFile), r.File(VerifyFile), r.File(TasksFile),
-		replanAdvice(r), replanOffer(r, "the plan, or this task,"), rules(r))
-	goal = fmt.Sprintf("Task %d of %s (%q) is done and committed, or %s explains why the plan cannot work; %s is untouched.",
-		i+1, r.File(TasksFile), t.Title, r.File(ReplanFile), r.File(VerifyFile))
-	return prompt, goal
-}
-
-// replanOffer tells a session that carries out the plan how to say the plan
-// cannot work (docs/specs/2026-10-12-run-replan-design.md). Without it, a
-// session given an impossible task goes round it until its turns run out.
-func replanOffer(r Run, what string) string {
-	return fmt.Sprintf("\nIf you find that %s cannot be done as it is written, not because it is hard but because it cannot work in this repository, do not keep trying. Write %s saying what you tried, what makes it impossible, and what is true instead; commit it, and stop. A reviewer then decides: the run may be planned again from what you found, or you will be told how to go on.\n",
-		what, r.File(ReplanFile))
-}
-
-// replanAdvice is what Claude said when it disagreed that the plan cannot
-// work, for the session that takes the step up again.
-func replanAdvice(r Run) string {
-	if strings.TrimSpace(r.ReplanAdvice) == "" {
-		return ""
-	}
-	return "\nAn earlier session on this step said the plan cannot work. A reviewer looked and says it can. Their note:\n\n" + strings.TrimSpace(r.ReplanAdvice) + "\n"
-}
-
-// maxOutput is how much of verify.sh's output a prompt carries, from the end,
-// where a failure explains itself.
-const maxOutput = 20000
-
-func tail(s string) string {
-	if len(s) > maxOutput {
-		return "(earlier output cut)\n" + s[len(s)-maxOutput:]
-	}
-	return s
-}
-
-// FixPrompt asks for a failing check to be fixed. advice is what Claude said
-// when it last refused to change the check.
-func FixPrompt(r Run, output, advice string) (prompt, goal string) {
-	var extra string
-	if strings.TrimSpace(advice) != "" {
-		extra = "\n\nA reviewer looked at the check and says it is right. Their note:\n\n" + strings.TrimSpace(advice) + "\n"
-	}
-	prompt = fmt.Sprintf(`The run's check, %[1]s, fails. This is the end of its output:
-
-~~~
-%[2]s
-~~~
-%[3]s
-Find the cause and fix it, then commit. The brief is %[4]s, the plan is %[5]s and the map of the code is %[10]s, if you need them. Run %[1]s yourself with bash to see the fix work.
-
-If you are sure the check itself is wrong, and not the work, do not touch %[1]s. Write %[6]s instead, saying exactly what is wrong with the check and what it should do, commit it, and stop. A reviewer then decides.
-%[8]s%[9]s%[7]s`, r.File(VerifyFile), strings.TrimSpace(tail(output)), extra, r.File(BriefFile), r.File(PlanFile), r.File(RevisionFile), rules(r),
-		replanAdvice(r), replanOffer(r, "the plan"), r.File(MapFile))
-	goal = fmt.Sprintf("The failure of %s shown in the first message is fixed and committed, or %s explains why the check is wrong, or %s explains why the plan cannot work; %s is untouched.",
-		r.File(VerifyFile), r.File(RevisionFile), r.File(ReplanFile), r.File(VerifyFile))
-	return prompt, goal
+// NewSessionNote opens a prompt for a session the run made after its last one
+// ended: it has none of the run in its context.
+func NewSessionNote(r Run) string {
+	return fmt.Sprintf(`You are taking over an automated run in this worktree, on the branch %s, from %s. An earlier session did its work: the brief is %s, the plan %s and the tasks %s, and `+"`git log origin/%s..HEAD`"+` shows what it committed. Read them before you start.
+%s
+`, r.Branch, r.Base, r.File(BriefFile), r.File(PlanFile), r.File(TasksFile), r.Base, rules())
 }
 
 // reviewer opens every prompt Claude gets.
-const reviewer = "You are reviewing one step of an automated coding run in this repository. You can read files; you cannot change them or run commands. The runner acts on your answer, so answer in exactly the form asked for.\n\n"
-
-// PlanReviewPrompt asks Claude to review the plan, once.
-func PlanReviewPrompt(r Run) string {
-	return reviewer + fmt.Sprintf(`The brief is %[1]s. The plan, written by a smaller model, is %[2]s.
-
-Check that the plan does everything the brief asks, and nothing it does not, and that it will work in this codebase: read the code it names. Keep its sections and its size, about two pages with no code: the sessions doing the work write the code.
-
-%[5]s
-
-The plan ends with a "%[3]s" section: the behaviors the brief leaves open, and what the plan chose for each. The owner reads it in the pull request, so a disagreement must stay visible there, never be quietly resolved:
-- keep every entry;
-- to change a decision, leave its entry, add a line "Changed by review: the plan chose X; the review chose Y, because Z.", and move the entry to the top of the section;
-- to add a decision the plan missed, mark the entry "Added by review";
-- if the plan has no such section, add one.
-
-If the plan needs changes, reply with the complete revised plan between these two lines:
-
-%[4]s
-%[6]s
-
-If it is good as it is, reply with exactly: NO CHANGES`, r.File(BriefFile), r.File(PlanFile), DecisionsHeading, Begin(PlanFile), expectation, End(PlanFile))
-}
-
-// VerifyReviewPrompt asks Claude to review verify.sh, which it may rewrite.
-func VerifyReviewPrompt(r Run, passedBefore bool, output string) string {
-	before := "fails"
-	if passedBefore {
-		before = "PASSES, which proves nothing unless the brief is already met. If the brief is not met, make the script fail by running tests of the new behavior by name, not by checking the source"
-	}
-	return reviewer + fmt.Sprintf(`The brief is %[1]s and the plan %[2]s. The check, written by a smaller model, is %[3]s.
-
-That script defines done for the whole run. The model doing the work may not change it, and the run is finished when it exits 0. The tasks are written after this review, from the script, and each test it names is given to one of them. Run now, before any work, it %[4]s. The end of its output:
-
-~~~
-%[5]s
-~~~
-
-Check that it proves the brief is done, the way CI would, and asks for no more than the brief does:
-- it builds, and runs what the repository's CI runs;
-- it runs, by name, tests of the new behavior, roughly one for each thing the brief asks for, and fails if any of them fails or did not run;
-- it requires no kind of test the brief or the plan rules out or says is not needed, and names a test of the logic rather than one driven through the UI unless the brief asks for the UI test. Take out any named test that goes beyond the brief;
-- a decision in the plan's "%[8]s" section needs no test of its own: the owner reviews the decisions in the pull request. Where a named test shows one, the comment above it names the decision;
-- it checks behavior only. It does not grep source files for names, strings or patterns, count tests, or check that files exist: those dictate how the work is written and fail correct work written differently. Take out any such check, and do not add one;
-- it cannot pass on the code as it is now;
-- it runs from the repository root under bash, on Windows with Git Bash.
-
-If it falls short, reply with a complete replacement between these two lines:
-
-%[6]s
-%[7]s
-
-%[9]s
-
-If it is right, reply with exactly: APPROVED`, r.File(BriefFile), r.File(PlanFile), r.File(VerifyFile), before,
-		strings.TrimSpace(tail(output)), Begin(VerifyFile), End(VerifyFile), DecisionsHeading, expectation)
-}
-
-// RevisePrompt asks Claude to judge a fix session's claim that the check is
-// wrong.
-func RevisePrompt(r Run, output string) string {
-	return reviewer + fmt.Sprintf(`The check for this run is %[1]s, and it fails. The session fixing it says the check itself is wrong; its reason is in %[2]s. The brief is %[3]s. The end of the check's output:
-
-~~~
-%[4]s
-~~~
-
-Decide who is right. If the check is wrong, reply with the corrected, complete script between these two lines:
-
-%[5]s
-%[6]s
-
-Keep it as strict as the brief requires, and no stricter: a test of a kind the brief rules out, or one for something it never asked, is the check's fault, not the work's. Do not weaken it to let broken work pass. Keep it a check of behavior, as CI is: run tests and commands, and do not add checks on the text of the source. %[7]s
-
-If the check is right and the work is wrong, reply with REFUSED, followed by one paragraph telling the next fix session what is actually wrong.`,
-		r.File(VerifyFile), r.File(RevisionFile), r.File(BriefFile), strings.TrimSpace(tail(output)), Begin(VerifyFile), End(VerifyFile), expectation)
-}
-
-// ReplanReviewPrompt asks Claude to judge a session's claim that the plan
-// cannot work. doing says what the session was on, such as a task.
-func ReplanReviewPrompt(r Run, doing string) string {
-	return reviewer + fmt.Sprintf(`A session doing one step of this run, %[1]s, says the plan cannot be carried out as written. Its reasons are in %[2]s. The brief is %[3]s, the plan %[4]s and the tasks %[5]s. The check, %[6]s, defines done for the run.
-
-Decide whether it is right. Check its reasons against the repository: read the code, the build files and the tests they name. A plan that is hard, or a session that has not yet found the way, is not a plan that cannot work.
-
-If the plan cannot work as written, reply with REPLAN on its own line, then the finding: what cannot be done as planned, why, and what is true instead that a new plan can build on. Name files, APIs and commands. The run goes back to be planned again from the brief, and the planner reads your finding first. If it is the brief itself that asks for something impossible, still reply REPLAN and say so: if planning again cannot get round it, the run fails to its owner.
-
-If it can work, reply with REFUSED on its own line, then one paragraph telling the next session on this step how to go on.`,
-		doing, r.File(ReplanFile), r.File(BriefFile), r.File(PlanFile), r.File(TasksFile), r.File(VerifyFile))
-}
+const reviewer = "You are reviewing an automated coding run in this repository. You can read files; you cannot change them or run commands. The runner acts on your answer, so answer in exactly the form asked for.\n\n"
 
 // FinalReviewPrompt asks Claude for blockers in the finished work, once.
 func FinalReviewPrompt(r Run, changed []string) string {
-	return reviewer + fmt.Sprintf(`The run is finished and its check, %[1]s, passes. Review the work against the brief, %[2]s, before it becomes a pull request. The plan is %[3]s. The branch changed these files since %[4]s:
+	return reviewer + fmt.Sprintf(`The run's work is finished. Review it against the brief, %[1]s, before it becomes a pull request. The plan is %[2]s and the tasks %[3]s. The branch changed these files since %[4]s:
 
 %[5]s
 
 Report only blockers. A blocker is one of:
 - the work does not do what the brief asks;
-- it has a bug.
+- it has a bug;
+- what the brief asks for is not tested.
 
-Style, naming, refactoring, suggestions, anything starting "consider", and anything the brief did not ask for are NOT blockers. Leave them out, or put them in notes, which go in the pull request description and change nothing. Every blocker becomes a task the run must do, so do not report one you would not insist on.
-
-That task's session may not change %[1]s. Never ask for a change to %[1]s: say what the code must do, and where a test would show it, in the project's own tests. If %[1]s misses a bug, the bug is the blocker.
+Style, naming, refactoring, suggestions, anything starting "consider", and anything the brief did not ask for are NOT blockers. Leave them out, or put them in notes, which go in the pull request description and change nothing. Every blocker becomes a task the run must do, so do not report one you would not insist on. Say what the code must do, and where a test would show it.
 
 %[6]s The plan's "%[7]s" section records what the run chose for each behavior the brief left open. If you think one goes against what users would expect, say so in notes, not as a blocker: the decision is the owner's, made from the pull request.
 
@@ -383,22 +144,28 @@ Reply with one fenced json block:
 {"blockers": [{"title": "what must change", "detail": "where, and why it blocks"}], "notes": ["anything worth mentioning that is not a blocker"]}
 `+"```"+`
 
-For good work the right answer has no blockers.`, r.File(VerifyFile), r.File(BriefFile), r.File(PlanFile), r.Base, "- "+strings.Join(changed, "\n- "), expectation, DecisionsHeading)
+For good work the right answer has no blockers.`, r.File(BriefFile), r.File(PlanFile), r.File(TasksFile), r.Base, "- "+strings.Join(changed, "\n- "), expectation, DecisionsHeading)
 }
 
-// CIFixPrompt asks for the PR's failing checks to be fixed. failures is each
-// failed check with the end of its log.
+// maxOutput is how much of a CI failure a prompt carries, from the end, where
+// a failure explains itself.
+const maxOutput = 20000
+
+func tail(s string) string {
+	if len(s) > maxOutput {
+		return "(earlier output cut)\n" + s[len(s)-maxOutput:]
+	}
+	return s
+}
+
+// CIFixPrompt asks the session to fix the PR's failing checks. failures is
+// each failed check with the end of its log.
 func CIFixPrompt(r Run, failures string) (prompt, goal string) {
 	prompt = fmt.Sprintf(`The run's pull request is open, and its CI fails. These are the failed checks, with the end of each log:
 
-%[1]s
+%s
 
-Find the cause and fix it, then commit. The brief is %[2]s, the plan is %[3]s and the map of the code is %[9]s, if you need them. CI may check things %[4]s does not, such as formatting, another platform or a linter; fix what it reports. Then run %[4]s yourself with bash: a CI fix that breaks the brief is no fix.
-
-If you are sure the failure shows %[4]s is wrong, do not touch it. Write %[5]s instead, saying exactly what is wrong with the check, commit it, and stop.
-%[7]s%[8]s%[6]s`, strings.TrimSpace(tail(failures)), r.File(BriefFile), r.File(PlanFile), r.File(VerifyFile), r.File(RevisionFile), rules(r),
-		replanAdvice(r), replanOffer(r, "the plan"), r.File(MapFile))
-	goal = fmt.Sprintf("The CI failures listed in the first message are fixed and committed and %s still passes, or %s explains why the plan cannot work; %s is untouched.",
-		r.File(VerifyFile), r.File(ReplanFile), r.File(VerifyFile))
+Find the cause and fix it, then commit; the runner pushes it. CI may check things your own run of the tests did not, such as formatting, another platform or a linter: fix what it reports, and run the build and tests again to be sure the fix breaks nothing else. If a failure is not the work's fault, such as a network error fetching a dependency, change nothing and say so. The rules from the first message still hold.`, strings.TrimSpace(tail(failures)))
+	goal = "The CI failures listed in the last message are fixed and committed, or shown not to be the work's fault, and the project's build and tests pass."
 	return prompt, goal
 }

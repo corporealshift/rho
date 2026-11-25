@@ -88,7 +88,7 @@ fun goalStatus(labels: List<String>): String? {
  * (docs/specs/2026-10-13-claude-park-and-skip-design.md). A goal's only one is
  * its check: its breakdown writes the briefs.
  */
-val CLAUDE_GATES = setOf("plan-review", "verify-review", "revise", "replan-review", "final-review")
+val CLAUDE_GATES = setOf("final-review")
 
 /**
  * A home's labels once the owner skips the Claude check its run or goal is at:

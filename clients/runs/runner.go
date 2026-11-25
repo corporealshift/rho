@@ -27,7 +27,6 @@ type Runner struct {
 	Git    Git
 	GH     GH
 	Claude Claude
-	Shell  Shell
 	Now    func() time.Time
 	Log    io.Writer
 
@@ -55,6 +54,7 @@ func (rn *Runner) load() error {
 	}
 	rn.runs = map[string]*Run{}
 	for i := range all {
+		all[i] = upgrade(all[i])
 		rn.runs[all[i].Home] = &all[i]
 	}
 	rn.goals = map[string]*Goal{}
@@ -66,7 +66,7 @@ func (rn *Runner) load() error {
 
 func (rn *Runner) save(r *Run) error {
 	r.Updated = rn.Now()
-	if key := fmt.Sprintf("%s %d", r.Step, r.Task); key != r.SinceKey {
+	if key := string(r.Step); key != r.SinceKey {
 		r.Since, r.SinceKey = r.Updated, key
 	}
 	return r.Save(rn.Root)
@@ -89,11 +89,12 @@ func (rn *Runner) Active() int {
 	return n
 }
 
-// Busy is how many runs have a session going: the slots they hold.
+// Busy is how many runs have their session working on a step: the slots they
+// hold. A run's session sits idle between its steps, and holds none then.
 func (rn *Runner) Busy() int {
 	n := 0
 	for _, r := range rn.runs {
-		if !r.Step.Over() && r.Session != "" {
+		if !r.Step.Over() && r.Step.Session() && !r.Waiting {
 			n++
 		}
 	}
@@ -246,11 +247,8 @@ func (rn *Runner) pickUpSkips(ctx context.Context, d Daemon) error {
 func (rn *Runner) label(ctx context.Context, d Daemon, r *Run, current []string) error {
 	want := "run:" + string(r.Step)
 	attempt := ""
-	switch {
-	case r.Step == StepCIFix:
+	if r.Step == StepCIFix {
 		attempt = fmt.Sprintf("run:attempt:%d/%d", r.CIFixes, MaxCIFixes)
-	case r.Step == StepFix || (r.Step == StepCheck && r.Fixes > 0):
-		attempt = fmt.Sprintf("run:attempt:%d/%d", r.Fixes, MaxFixes)
 	}
 	key := want + " " + attempt
 	if r.Labelled == key {
@@ -325,6 +323,12 @@ func (rn *Runner) advance(ctx context.Context, d Daemon, r *Run) error {
 		if r.FailedAt != "" && failedBefore == "" {
 			rn.logf("run %s failed at %s: %s; worktree %s", r.Home, r.FailedAt, r.Why, r.Worktree)
 		}
+		if r.Step.Over() && r.Session != "" {
+			// The run's session has nothing left to do.
+			if err := d.Stop(ctx, r.Session); err != nil {
+				rn.logf("run %s: stopping session %s: %v", r.Home, r.Session, err)
+			}
+		}
 		if r.Step.Over() && r.Issue != 0 && !r.Reported {
 			if err := rn.report(ctx, r); err != nil {
 				rn.logf("run %s: telling issue #%d: %v", r.Home, r.Issue, err)
@@ -364,29 +368,13 @@ func (rn *Runner) wait(r *Run, o Outcome) error {
 }
 
 // skipped passes the Claude gate a run is at without asking Claude, as the
-// owner asked: the run's work stands as it is. A revision or re-plan request
-// is answered the way Claude's refusal would answer it.
-func (rn *Runner) skipped(ctx context.Context, r *Run) (Outcome, error) {
+// owner asked: the run's work stands as it is.
+func (rn *Runner) skipped(r *Run) Outcome {
 	if !slices.Contains(r.Skipped, r.Step) {
 		r.Skipped = append(r.Skipped, r.Step)
 	}
-	o := Outcome{OK: true, Skipped: true}
-	switch r.Step {
-	case StepRevise:
-		r.Advice = "The owner kept verify.sh as it is, without asking Claude. Make it pass."
-		o.Note = r.Advice
-		if err := rn.Git.Remove(ctx, r.Worktree, "run: revision request answered by the owner", r.File(RevisionFile)); err != nil {
-			return Outcome{}, err
-		}
-	case StepReplanReview:
-		o.Refused = "The owner skipped Claude's review and says the plan stands. Carry on with it."
-		o.Note = o.Refused
-		if err := rn.Git.Remove(ctx, r.Worktree, "run: re-plan request answered by the owner", r.File(ReplanFile)); err != nil {
-			return Outcome{}, err
-		}
-	}
 	rn.logf("run %s: %s skipped by the owner", r.Home, r.Step)
-	return o, nil
+	return Outcome{OK: true, Skipped: true}
 }
 
 // claudeFailed is a gate's outcome when its question got no answer: a wait
@@ -403,31 +391,18 @@ func claudeFailed(err error) Outcome {
 // record adds the step just finished to the run's history, before Transition
 // moves on and forgets its session.
 func (rn *Runner) record(r *Run, o Outcome) {
-	rec := Record{Step: r.Step, Session: r.Session, OK: o.OK, Why: o.Why, Note: o.Note, At: rn.Now()}
-	if r.Step == StepWork {
-		rec.Task = r.Task
+	rec := Record{Step: r.Step, OK: o.OK, Why: o.Why, Note: o.Note, At: rn.Now()}
+	if r.Step.Session() {
+		rec.Session = r.Session
 	}
 	switch {
 	case !o.OK:
 	case o.Skipped:
 		rec.Result = "skipped by the owner"
-	case o.ReplanRequest:
-		rec.Result = "said the plan cannot work"
-	case r.Step == StepReplanReview && o.Replan != "":
-		rec.Result = "re-planned"
-	case r.Step == StepReplanReview:
-		rec.Result = "refused"
-	case o.Replan != "":
-		rec.Result = "Claude judged the plan cannot work"
-	case r.Step == StepWork:
-	case r.Step == StepCheck:
-		rec.Result = map[bool]string{true: "passed", false: "failed"}[o.CheckPassed]
 	case r.Step == StepFinalReview:
 		rec.Result = fmt.Sprintf("%d blockers", o.Blockers)
 	case r.Step == StepCI:
 		rec.Result = o.CI
-	case o.Revision:
-		rec.Result = "asked for a revision of verify.sh"
 	}
 	r.History = append(r.History, rec.cut())
 	if len(r.History) > maxHistory {
@@ -476,95 +451,157 @@ func (rn *Runner) settingsOf(ctx context.Context, d Daemon, home string) Setting
 	return Settings{Context: h.Context, Effort: h.Effort}
 }
 
-// begin starts the current step's session. The session id is saved before
-// the prompt is sent, so a restart in between sends it, and never makes a
-// second session.
+// begin sends the current step's prompt to the run's session, making the
+// session first when the run has none, or its last one has ended. The
+// session id is saved before the prompt is sent, so a restart in between
+// sends it, and never makes a second session.
 func (rn *Runner) begin(ctx context.Context, d Daemon, r *Run) error {
+	var err error
+	if r.Start, err = rn.Git.Head(ctx, r.Worktree); err != nil {
+		return err
+	}
+	if r.Session != "" {
+		st, err := d.State(ctx, r.Session)
+		if err != nil || !promptable(st.State) {
+			why := "it is " + string(st.State)
+			if err != nil {
+				why = err.Error()
+			}
+			rn.logf("run %s: session %s cannot be prompted again (%s); making a new one", r.Home, r.Session, why)
+			r.Session = ""
+		}
+	}
+	if r.Session == "" {
+		// Anything the last session left uncommitted goes: the new one
+		// carries on from what is committed.
+		if err := rn.resetHard(ctx, r.Worktree, r.Start); err != nil {
+			return err
+		}
+		set := rn.settingsOf(ctx, d, r.Home)
+		if set.Effort == "" {
+			// The home's own effort wins, so a person can turn one run up or down.
+			set.Effort = rn.Cfg.Effort
+		}
+		id, err := d.Create(ctx, r.Worktree, r.Home, rn.Cfg.Turns, set)
+		if err != nil {
+			return err
+		}
+		r.Session, r.Fresh = id, true
+		rn.logf("run %s: session %s", r.Home, id)
+	}
+	r.Waiting = false
+	if err := rn.save(r); err != nil {
+		return err
+	}
 	prompt, goal, err := rn.prompt(ctx, d, r)
 	if err != nil {
 		return err
 	}
-	// A plan session fills in an outline rather than writing the plan whole.
-	// It goes in before Start, so a session that leaves it as it is has not
-	// planned. After a re-plan it replaces the old plan.
-	if r.Step == StepPlan {
-		if err := rn.write(ctx, r, PlanFile, PlanOutline, "run: plan outline"); err != nil {
-			return err
-		}
-	}
-	if r.Start, err = rn.Git.Head(ctx, r.Worktree); err != nil {
+	if err := rn.send(ctx, d, r, prompt, goal); err != nil {
 		return err
 	}
-	turns := rn.Cfg.PlanTurns
-	switch r.Step {
-	case StepWork, StepFix, StepCIFix:
-		turns = rn.Cfg.WorkTurns
-	case StepReflect:
-		turns = rn.Cfg.ReflectTurns
+	rn.logf("run %s: %s, in session %s", r.Home, r.Step, r.Session)
+	return nil
+}
+
+// activeGoal reports whether a session's goal still drives it
+// (protocol/spec.md, the goal event).
+func activeGoal(g *protocol.GoalData) bool {
+	if g == nil {
+		return false
 	}
-	set := rn.settingsOf(ctx, d, r.Home)
-	if set.Effort == "" {
-		// The home's own effort wins, so a person can turn one run up or down.
-		set.Effort = rn.Cfg.Effort[r.Step]
+	switch g.State {
+	case "met", "impossible", "cleared":
+		return false
 	}
-	id, err := d.Create(ctx, r.Worktree, r.Home, turns, set)
-	if err != nil {
-		return err
-	}
-	r.Session, r.Waiting = id, false
-	if err := rn.save(r); err != nil {
-		return err
-	}
+	return true
+}
+
+// promptable reports whether a session in a state can be sent another
+// prompt.
+func promptable(s protocol.SessionState) bool {
+	return s == protocol.StateIdle || s == protocol.StateBlocked
+}
+
+// send gives the session its goal and prompt, and records that it has them.
+// A prompt with no goal, the reflection's, first ends any goal an earlier step
+// left active, so the goal's judge does not send the session back to that
+// step's work.
+func (rn *Runner) send(ctx context.Context, d Daemon, r *Run, prompt, goal string) error {
 	if goal != "" {
-		if err := d.SetGoal(ctx, id, goal); err != nil {
+		if err := d.SetGoal(ctx, r.Session, goal); err != nil {
 			return err
 		}
+	} else {
+		st, err := d.State(ctx, r.Session)
+		if err != nil {
+			return err
+		}
+		if activeGoal(st.Goal) {
+			if err := d.ClearGoal(ctx, r.Session); err != nil {
+				return err
+			}
+		}
 	}
-	if err := d.SendPrompt(ctx, id, prompt); err != nil {
+	if err := d.SendPrompt(ctx, r.Session, prompt); err != nil {
 		return err
 	}
-	r.Prompted = true
-	if r.Step == StepFix || r.Step == StepCIFix {
-		r.Advice = "" // it has been passed on
+	r.Prompted, r.Fresh = true, false
+	if r.Step == StepWork {
+		r.Blockers = nil // they have been passed on
 	}
-	rn.logf("run %s: %s session %s", r.Home, r.Step, id)
 	return rn.save(r)
 }
 
-// prompt is the current step's prompt, and its goal for work and fix.
+// prompt is the current step's prompt for the run's session, and its goal. A
+// session new to the run has nothing of it in its context: at work it gets
+// the whole work prompt, which says where to find what is already done, and
+// at ci-fix it is told where the run stands first.
 func (rn *Runner) prompt(ctx context.Context, d Daemon, r *Run) (string, string, error) {
 	switch r.Step {
-	case StepBrief:
-		t, err := d.Transcript(ctx, r.Home)
-		return BriefPrompt(*r, t), "", err
-	case StepPlan:
-		return PlanPrompt(*r), "", nil
-	case StepTasks:
-		return TasksPrompt(*r), "", nil
-	case StepVerify:
-		return VerifyPrompt(*r), "", nil
 	case StepWork:
-		tasks, err := rn.tasks(r)
-		if err != nil {
-			return "", "", err
+		switch {
+		case r.Fresh:
+		case len(r.Blockers) > 0:
+			p, g := BlockersPrompt(*r, r.Blockers)
+			return p, g, nil
+		case r.Attempt > 0:
+			missing, err := rn.missing(ctx, r)
+			if err != nil {
+				return "", "", err
+			}
+			if missing == "" {
+				missing = "the last try at it did not finish."
+			}
+			p, g := ContinuePrompt(*r, missing)
+			return p, g, nil
 		}
-		i, _ := NextTask(tasks)
-		if i < 0 {
-			return "", "", errors.New("work with no task left")
-		}
-		r.Task = i
-		p, g := WorkPrompt(*r, i, len(tasks), tasks[i])
-		return p, g, nil
-	case StepFix:
-		p, g := FixPrompt(*r, r.Output, r.Advice)
-		return p, g, nil
+		return rn.workPrompt(ctx, d, r)
 	case StepCIFix:
 		p, g := CIFixPrompt(*r, r.Output)
+		if r.Fresh {
+			p = NewSessionNote(*r) + p
+		}
 		return p, g, nil
 	case StepReflect:
 		return ReflectPrompt(*r, rn.digest(ctx, d, r)), "", nil
 	}
 	return "", "", fmt.Errorf("%s has no session", r.Step)
+}
+
+// workPrompt is the whole work prompt, with the home's conversation when the
+// run has no brief yet.
+func (rn *Runner) workPrompt(ctx context.Context, d Daemon, r *Run) (string, string, error) {
+	var transcript string
+	if r.Brief == "" {
+		t, err := d.Transcript(ctx, r.Home)
+		if err != nil {
+			return "", "", err
+		}
+		transcript = t
+	}
+	p, g := WorkPrompt(*r, transcript)
+	return p, g, nil
 }
 
 // digest is the run's Digest, from its files and its sessions' logs. A log
@@ -638,230 +675,72 @@ func (rn *Runner) write(ctx context.Context, r *Run, name, text, msg string) err
 	return rn.Git.Commit(ctx, r.Worktree, msg, r.File(name))
 }
 
-// observe checks on the current step's session. done is false while it is
-// still working.
+// maxNudges is how many times, in one step, a session that ended its turn
+// short of what the step asks is told so and left to carry on, before that
+// counts as a failed try. One session does all of a run's work, so stopping
+// halfway through the tasks is the common case, not a failure.
+const maxNudges = 3
+
+// observe checks on the run's session at the current step. done is false
+// while it is still working.
 func (rn *Runner) observe(ctx context.Context, d Daemon, r *Run) (Outcome, bool, error) {
 	if !r.Prompted {
-		// A restart between creating the session and prompting it. The
-		// session is idle and empty; prompt it now.
+		// A restart between saving the session and prompting it.
 		prompt, goal, err := rn.prompt(ctx, d, r)
 		if err != nil {
 			return Outcome{}, false, err
 		}
-		if goal != "" {
-			if err := d.SetGoal(ctx, r.Session, goal); err != nil {
-				return Outcome{}, false, err
-			}
-		}
-		if err := d.SendPrompt(ctx, r.Session, prompt); err != nil {
-			return Outcome{}, false, err
-		}
-		r.Prompted = true
-		return Outcome{}, false, rn.save(r)
+		return Outcome{}, false, rn.send(ctx, d, r, prompt, goal)
 	}
 	st, err := d.State(ctx, r.Session)
 	if err != nil {
 		return Outcome{}, false, err
 	}
-	if r.Finding != "" {
-		// Claude judged the plan cannot work, and the session was stopped
-		// for it. However it ended, the verdict is what the step produced.
-		if st.State == protocol.StateRunning {
-			return Outcome{}, false, nil
-		}
-		o, err := rn.produced(ctx, d, r, false)
-		return o, true, err
-	}
 	switch st.State {
 	case protocol.StateRunning:
-		if claims(r.Step) {
-			return Outcome{}, false, rn.watch(ctx, d, r)
-		}
 		return Outcome{}, false, nil
-	case protocol.StateIdle:
-		events, err := d.Events(ctx, r.Session)
-		if err != nil {
-			return Outcome{}, false, err
-		}
-		if !answeredAfter(events, r.NudgedAt) {
-			// Not started yet, or not yet answered the nudge.
-			return Outcome{}, false, nil
-		}
-		met := st.Goal != nil && st.Goal.State == "met"
-		if !r.Stopped && r.NudgedAt == 0 {
-			// The local model sometimes ends its turn having written
-			// nothing. It is told once, in the same session, before that
-			// counts as a failure: it keeps what it read, and the runner
-			// knows exactly what is missing.
-			missing, err := rn.missing(ctx, r, met)
+	case protocol.StateIdle, protocol.StateBlocked:
+		if !r.Stopped {
+			events, err := d.Events(ctx, r.Session)
 			if err != nil {
 				return Outcome{}, false, err
 			}
-			if missing != "" {
-				if err := d.SendPrompt(ctx, r.Session, missing); err != nil {
+			if !answeredAfter(events, r.NudgedAt) {
+				// Not started on the prompt yet, or not yet answered the nudge.
+				return Outcome{}, false, nil
+			}
+			if r.Step != StepReflect && r.Nudges < maxNudges {
+				if err := rn.commitRunFiles(ctx, r); err != nil {
 					return Outcome{}, false, err
 				}
-				r.NudgedAt = len(events)
-				rn.logf("run %s: %s session %s stopped short; told it so", r.Home, r.Step, r.Session)
-				return Outcome{}, false, rn.save(r)
-			}
-		}
-		if !r.Stopped {
-			r.Stopped = true
-			if err := rn.save(r); err != nil {
-				return Outcome{}, false, err
-			}
-		}
-		if err := d.Stop(ctx, r.Session); err != nil {
-			rn.logf("run %s: stopping session %s: %v", r.Home, r.Session, err)
-		}
-	case protocol.StateCompleted:
-		if !r.Stopped {
-			return rn.discard(ctx, r, "the session was stopped before it finished")
-		}
-	case protocol.StateBlocked:
-		if !judgedByCheck(r.Step) {
-			return rn.discard(ctx, r, "the session ended blocked")
-		}
-		// A fix is judged by the check that follows it, not by its own stop
-		// gate. Seen live: a fix session committed a revision request, its
-		// gate then refused every stop over a check it could not clear, and
-		// both commits were thrown away. What it left uncommitted goes: the
-		// check would otherwise judge files the pull request never gets.
-		if !r.Stopped {
-			head, err := rn.Git.Head(ctx, r.Worktree)
-			if err != nil {
-				return Outcome{}, false, err
-			}
-			if err := rn.resetHard(ctx, r.Worktree, head); err != nil {
-				return Outcome{}, false, err
+				missing, err := rn.missing(ctx, r)
+				if err != nil {
+					return Outcome{}, false, err
+				}
+				if missing != "" {
+					if err := d.SendPrompt(ctx, r.Session, "You ended your turn, but "+missing+" Carry on until it is done."); err != nil {
+						return Outcome{}, false, err
+					}
+					r.NudgedAt, r.Nudges = len(events), r.Nudges+1
+					rn.logf("run %s: session %s stopped short at %s (%s); told it so", r.Home, r.Session, r.Step, missing)
+					return Outcome{}, false, rn.save(r)
+				}
 			}
 			r.Stopped = true
 			if err := rn.save(r); err != nil {
 				return Outcome{}, false, err
 			}
-			rn.logf("run %s: %s session %s ended blocked; judging what it committed", r.Home, r.Step, r.Session)
-		}
-		if err := d.Stop(ctx, r.Session); err != nil {
-			rn.logf("run %s: stopping session %s: %v", r.Home, r.Session, err)
 		}
 	default:
-		return rn.discard(ctx, r, "the session ended "+string(st.State))
+		// Stopped from outside, out of budget, or broken: what it committed
+		// stays, and a retry makes a new session to carry on from it.
+		if r.Step == StepReflect {
+			return Outcome{OK: true}, true, rn.resetHard(ctx, r.Worktree, r.Start)
+		}
+		return Outcome{Why: fmt.Sprintf("the session ended %s (session %s)", st.State, r.Session)}, true, rn.resetHard(ctx, r.Worktree, "HEAD")
 	}
-	o, err := rn.produced(ctx, d, r, st.Goal != nil && st.Goal.State == "met")
+	o, err := rn.produced(ctx, d, r)
 	return o, true, err
-}
-
-// planVerdict opens a claude.ask answer that says the task cannot be done as
-// it is set out. The claude module asks for it in the questions it puts on a
-// session's behalf, and defines it as PlanVerdict; a client never imports a
-// module, so it is spelled here again.
-const planVerdict = "PLAN CANNOT WORK"
-
-// claudeSource is how the claude module's own calls are logged.
-const claudeSource = "module:claude"
-
-// watch reads what a running session has logged since the last poll, for
-// Claude's verdict, put on its behalf, that the plan cannot work
-// (docs/specs/2026-10-12-run-replan-design.md). On one, the session is
-// stopped, and the verdict is acted on once it has.
-func (rn *Runner) watch(ctx context.Context, d Daemon, r *Run) error {
-	events, err := d.EventsAfter(ctx, r.Session, r.Seen)
-	if err != nil {
-		return err
-	}
-	finding, seen := verdictIn(events)
-	if seen == "" || (seen == r.Seen && finding == "") {
-		return nil
-	}
-	r.Seen = seen
-	if finding != "" {
-		r.Finding, r.Stopped = finding, true
-		rn.logf("run %s: claude judged the plan cannot work; stopping %s session %s", r.Home, r.Step, r.Session)
-	}
-	if err := rn.save(r); err != nil {
-		return err
-	}
-	if finding != "" {
-		if err := d.Stop(ctx, r.Session); err != nil {
-			rn.logf("run %s: stopping session %s: %v", r.Home, r.Session, err)
-		}
-	}
-	return nil
-}
-
-// verdictIn finds the claude module's answer that says the plan cannot work.
-// seen is the id of the last event read through: a call of the module's whose
-// result is not logged yet is left for the next read, so the pair is seen
-// together.
-func verdictIn(events []protocol.Event) (finding, seen string) {
-	calls := map[string]bool{}
-	pending := -1
-	for i, e := range events {
-		switch e.Type {
-		case protocol.EventToolCall:
-			var c protocol.ToolCallData
-			if json.Unmarshal(e.Data, &c) == nil && c.Tool == "claude.ask" && c.Source == claudeSource {
-				calls[c.CallID] = true
-				if pending < 0 {
-					pending = i
-				}
-			}
-		case protocol.EventToolResult:
-			var res protocol.ToolResultData
-			if json.Unmarshal(e.Data, &res) != nil || !calls[res.CallID] {
-				continue
-			}
-			delete(calls, res.CallID)
-			if len(calls) == 0 {
-				pending = -1
-			}
-			if res.Status != "error" && opensWithVerdict(res.Content) {
-				_, after, _ := strings.Cut(res.Content, planVerdict)
-				finding = strings.TrimSpace(strings.TrimLeft(after, ":.-— \r\n*_`"))
-				if finding == "" {
-					// The verdict with no reason still stands; the planner
-					// at least learns the last plan could not work.
-					finding = planVerdict
-				}
-				return finding, e.ID
-			}
-		}
-	}
-	end := len(events)
-	if pending >= 0 {
-		end = pending
-	}
-	if end == 0 {
-		return "", ""
-	}
-	return "", events[end-1].ID
-}
-
-// opensWithVerdict reports whether an answer's first line is the verdict.
-func opensWithVerdict(answer string) bool {
-	for l := range strings.SplitSeq(answer, "\n") {
-		l = strings.TrimSpace(strings.Trim(strings.TrimSpace(l), "*_`#"))
-		if l == "" {
-			continue
-		}
-		return strings.HasPrefix(l, planVerdict)
-	}
-	return false
-}
-
-// judgedByCheck says a step's session is followed by the check, which runs
-// verify.sh on what it committed, whatever the session itself concluded.
-func judgedByCheck(s Step) bool { return s == StepFix || s == StepCIFix }
-
-// discard throws away a failed session's commits, so its retry starts clean.
-func (rn *Runner) discard(ctx context.Context, r *Run, why string) (Outcome, bool, error) {
-	if r.Start != "" {
-		if err := rn.resetHard(ctx, r.Worktree, r.Start); err != nil {
-			return Outcome{}, false, err
-		}
-	}
-	return Outcome{Why: fmt.Sprintf("%s (session %s)", why, r.Session)}, true, nil
 }
 
 // resetHard is Git.ResetHard, except that a file left behind is logged rather
@@ -879,122 +758,40 @@ func (rn *Runner) resetHard(ctx context.Context, dir, sha string) error {
 	return err
 }
 
-// missing is what a session that ended its turn still owes its step, as the
-// message that says so, or "" when it owes nothing the runner can see.
-func (rn *Runner) missing(ctx context.Context, r *Run, goalMet bool) (string, error) {
-	if own := ownFile(r.Step); own != "" {
-		if text, ok := rn.read(r, own); !ok || strings.TrimSpace(text) == "" {
-			return fmt.Sprintf("You ended your turn without writing %s. Write it now, as the first message asked, and commit it.", r.File(own)), nil
-		}
-		if mustRewrite(r) {
-			done, err := rn.rewrote(ctx, r, own)
-			if err != nil || done {
-				return "", err
-			}
-			if own == PlanFile && r.Replans == 0 {
-				return fmt.Sprintf("You ended your turn without filling in the outline in %s. Fill it in now, a section at a time, as the first message asked, and commit it.", r.File(own)), nil
-			}
-			return fmt.Sprintf("You ended your turn without rewriting %s. The old one could not be carried out; write it again now, as the first message asked, and commit it.", r.File(own)), nil
-		}
-		return "", nil
-	}
+// missing is what the session still owes the current step, as the end of a
+// sentence that says so, or "" when it owes nothing the runner can see.
+func (rn *Runner) missing(ctx context.Context, r *Run) (string, error) {
+	var owed []string
 	if r.Step == StepWork {
-		head, err := rn.Git.Head(ctx, r.Worktree)
-		if err != nil {
-			return "", err
+		if r.Brief == "" {
+			if text, ok := rn.read(r, BriefFile); !ok || strings.TrimSpace(text) == "" {
+				owed = append(owed, r.File(BriefFile)+" is not written")
+			}
 		}
-		if head == r.Start && !goalMet {
-			return "You ended your turn without committing anything for this task. Do the task now, as the first message asked, and commit it.", nil
+		if text, ok := rn.read(r, PlanFile); !ok || strings.TrimSpace(text) == "" {
+			owed = append(owed, r.File(PlanFile)+" is not written")
 		}
-	}
-	return "", nil
-}
-
-// replanned acts on Claude's verdict that the plan cannot work, once the
-// session it stopped has ended. What the session committed stays, as any
-// session's work does when the run is planned again; what it left
-// uncommitted goes. A session that changed verify.sh loses everything it
-// did, as it would at any step.
-func (rn *Runner) replanned(ctx context.Context, r *Run) (Outcome, error) {
-	to, err := rn.Git.Head(ctx, r.Worktree)
-	if err != nil {
-		return Outcome{}, err
-	}
-	changed, err := rn.Git.Changed(ctx, r.Worktree, r.Start)
-	if err != nil {
-		return Outcome{}, err
-	}
-	if slices.Contains(changed, r.File(VerifyFile)) {
-		to = r.Start
-	}
-	if err := rn.resetHard(ctx, r.Worktree, to); err != nil {
-		return Outcome{}, err
-	}
-	if err := rn.found(ctx, r, r.Step, r.Finding); err != nil {
-		return Outcome{}, err
-	}
-	rn.logf("run %s: planning again from claude's verdict", r.Home)
-	return Outcome{OK: true, Replan: r.Finding, Note: r.Finding}, nil
-}
-
-// doing says what a session that claimed the plan cannot work was on, for
-// Claude.
-func (rn *Runner) doing(r *Run) string {
-	switch r.ReplanFrom {
-	case StepWork:
-		if tasks, err := rn.tasks(r); err == nil && r.Task < len(tasks) {
-			return fmt.Sprintf("task %d of %s, %q", r.Task+1, r.File(TasksFile), tasks[r.Task].Title)
+		tasks, err := rn.tasks(r)
+		switch {
+		case err != nil || len(tasks) == 0:
+			owed = append(owed, r.File(TasksFile)+" has no checkbox tasks")
+		default:
+			if _, left := NextTask(tasks); left > 0 {
+				owed = append(owed, fmt.Sprintf("%d of the %d tasks in %s are not ticked", left, len(tasks), r.File(TasksFile)))
+			}
 		}
-		return fmt.Sprintf("task %d of %s", r.Task+1, r.File(TasksFile))
-	case StepFix:
-		return "fixing the failing check"
-	case StepCIFix:
-		return "fixing the pull request's failing CI"
-	}
-	return string(r.ReplanFrom)
-}
-
-// found adds what was found to be impossible to findings.md, where the
-// planner reads it, under where it was found.
-func (rn *Runner) found(ctx context.Context, r *Run, from Step, finding string) error {
-	where := string(from)
-	if from == StepWork {
-		where = fmt.Sprintf("task %d", r.Task+1)
-	}
-	old, _ := rn.read(r, FindingsFile)
-	if old == "" {
-		old = "# What this run found it could not do as planned\n\n"
-	}
-	text := fmt.Sprintf("%s## %s, at %s\n\n%s\n\n", old, rn.Now().Format("2006-01-02 15:04"), where, strings.TrimSpace(finding))
-	return rn.write(ctx, r, FindingsFile, text, "run: what the plan could not do")
-}
-
-// mustRewrite reports whether a planning step has to change its file, not
-// just leave one there. The plan step always does: it starts from the
-// outline. After a re-plan the old tasks are still on the branch, and keeping
-// them would repeat what could not be done.
-func mustRewrite(r *Run) bool {
-	own := ownFile(r.Step)
-	return own == PlanFile || (r.Replans > 0 && own == TasksFile)
-}
-
-// rewrote reports whether the session changed one of the run's files,
-// committed or not.
-func (rn *Runner) rewrote(ctx context.Context, r *Run, name string) (bool, error) {
-	changed, err := rn.Git.Changed(ctx, r.Worktree, r.Start)
-	if err != nil {
-		return false, err
 	}
 	dirty, err := rn.Git.Dirty(ctx, r.Worktree)
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	return slices.Contains(changed, r.File(name)) || slices.Contains(dirty, r.File(name)), nil
-}
-
-// ownFile is the one file a planning step writes, or "" for other steps.
-func ownFile(s Step) string {
-	return map[Step]string{StepBrief: BriefFile, StepPlan: PlanFile, StepTasks: TasksFile, StepVerify: VerifyFile}[s]
+	if len(dirty) > 0 {
+		owed = append(owed, "these files have changes not committed: "+strings.Join(dirty, ", "))
+	}
+	if len(owed) == 0 {
+		return "", nil
+	}
+	return joinAnd(owed) + ".", nil
 }
 
 // answeredAfter reports whether the model has said anything since the log
@@ -1019,12 +816,28 @@ func answered(events []protocol.Event) bool {
 	return false
 }
 
-// produced checks what a finished session left behind, which is what the
-// step is judged on, never what the session said.
-//
-// goalMet is whether the session's goal was judged met, which is how a work
-// session that found its task already done is told from one that did nothing.
-func (rn *Runner) produced(ctx context.Context, d Daemon, r *Run, goalMet bool) (Outcome, error) {
+// commitRunFiles commits the run's own files when the session left them
+// uncommitted: they are what the step is judged on, and a session forgets.
+func (rn *Runner) commitRunFiles(ctx context.Context, r *Run) error {
+	dirty, err := rn.Git.Dirty(ctx, r.Worktree)
+	if err != nil {
+		return err
+	}
+	var left []string
+	for _, f := range []string{r.File(BriefFile), r.File(PlanFile), r.File(TasksFile)} {
+		if slices.Contains(dirty, f) {
+			left = append(left, f)
+		}
+	}
+	if len(left) == 0 {
+		return nil
+	}
+	return rn.Git.Commit(ctx, r.Worktree, "run: "+string(r.Step)+" (committed by the runner)", left...)
+}
+
+// produced judges what the session left behind once it ended its turn for
+// good, which is what the step is judged on, never what the session said.
+func (rn *Runner) produced(ctx context.Context, d Daemon, r *Run) (Outcome, error) {
 	if r.Step == StepReflect {
 		// A reflection saves memories, which live outside the worktree, so
 		// whatever it changed here goes.
@@ -1033,136 +846,28 @@ func (rn *Runner) produced(ctx context.Context, d Daemon, r *Run, goalMet bool) 
 		}
 		return Outcome{OK: true}, nil
 	}
-	if r.Finding != "" {
-		return rn.replanned(ctx, r)
+	if err := rn.commitRunFiles(ctx, r); err != nil {
+		return Outcome{}, err
 	}
-	if r.Step != StepVerify {
-		changed, err := rn.Git.Changed(ctx, r.Worktree, r.Start)
-		if err != nil {
+	missing, err := rn.missing(ctx, r)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if missing != "" {
+		// Uncommitted work is not the PR's, so it goes; the retry carries on
+		// from what was committed.
+		if err := rn.resetHard(ctx, r.Worktree, "HEAD"); err != nil {
 			return Outcome{}, err
 		}
-		dirty, err := rn.Git.Dirty(ctx, r.Worktree)
-		if err != nil {
-			return Outcome{}, err
-		}
-		if slices.Contains(changed, r.File(VerifyFile)) || slices.Contains(dirty, r.File(VerifyFile)) {
-			o, _, err := rn.discard(ctx, r, "the session changed verify.sh, which only the runner may change")
-			return o, err
-		}
+		return Outcome{Why: fmt.Sprintf("the session ended its turn, but %s (session %s)", missing, r.Session)}, nil
 	}
-
-	// A planning step writes its own file and the map, and nothing else. In a
-	// live run the verify session also wrote the feature and its tests, so the
-	// check passed before any work and task 1 found itself already done.
-	own := ownFile(r.Step)
-	if own != "" {
-		changed, err := rn.Git.Changed(ctx, r.Worktree, r.Start)
-		if err != nil {
-			return Outcome{}, err
-		}
-		dirty, err := rn.Git.Dirty(ctx, r.Worktree)
-		if err != nil {
-			return Outcome{}, err
-		}
-		var other []string
-		for _, f := range append(changed, dirty...) {
-			if f != r.File(own) && f != r.File(MapFile) && !slices.Contains(other, f) {
-				other = append(other, f)
-			}
-		}
-		if len(other) > 0 {
-			o, _, err := rn.discard(ctx, r, fmt.Sprintf("the %s step may write only %s and %s, and the session also changed %s",
-				r.Step, r.File(own), r.File(MapFile), strings.Join(other, ", ")))
-			return o, err
-		}
-		if mustRewrite(r) && !slices.Contains(changed, r.File(own)) && !slices.Contains(dirty, r.File(own)) {
-			why := "the run is being planned again, and the session did not rewrite " + r.File(own)
-			if own == PlanFile {
-				why = "the session did not fill in the outline in " + r.File(own)
-			}
-			o, _, err := rn.discard(ctx, r, why)
-			return o, err
-		}
-	}
-
-	// A session that says the plan cannot work is judged on that claim, by
-	// Claude, whatever else it did (docs/specs/2026-10-12-run-replan-design.md).
-	if claims(r.Step) {
-		if claim, ok := rn.read(r, ReplanFile); ok {
-			dirty, err := rn.Git.Dirty(ctx, r.Worktree)
-			if err != nil {
-				return Outcome{}, err
-			}
-			if slices.Contains(dirty, r.File(ReplanFile)) {
-				if err := rn.Git.Commit(ctx, r.Worktree, "run: re-plan request (committed by the runner)", r.File(ReplanFile)); err != nil {
-					return Outcome{}, err
-				}
-			}
-			rn.logf("run %s: %s session %s says the plan cannot work", r.Home, r.Step, r.Session)
-			return Outcome{OK: true, ReplanRequest: true, Note: claim}, nil
-		}
-	}
-
-	// The step's own file, committed by the runner if the session left it
-	// uncommitted: a smaller model forgets, and the file is what counts.
-	if own != "" {
-		text, ok := rn.read(r, own)
-		if !ok || strings.TrimSpace(text) == "" {
-			o, _, err := rn.discard(ctx, r, "the session did not write "+r.File(own))
-			return o, err
-		}
-		dirty, err := rn.Git.Dirty(ctx, r.Worktree)
-		if err != nil {
-			return Outcome{}, err
-		}
-		var left []string
-		for _, f := range []string{r.File(own), r.File(MapFile)} {
-			if slices.Contains(dirty, f) {
-				left = append(left, f)
-			}
-		}
-		if len(left) > 0 {
-			if err := rn.Git.Commit(ctx, r.Worktree, "run: "+string(r.Step)+" (committed by the runner)", left...); err != nil {
-				return Outcome{}, err
-			}
-		}
-	}
-
-	switch r.Step {
-	case StepBrief:
+	if r.Step == StepWork && r.Brief == "" {
 		text, _ := rn.read(r, BriefFile)
 		r.Brief = strings.TrimSpace(text)
 		// The home carries the brief as its description. Never as its goal,
 		// which would start the home working on it in the checkout.
 		if err := d.SetDescription(ctx, r.Home, r.Brief); err != nil {
 			return Outcome{}, err
-		}
-	case StepTasks:
-		tasks, err := rn.tasks(r)
-		if err != nil || len(tasks) == 0 {
-			o, _, err := rn.discard(ctx, r, "tasks.md has no checkbox tasks")
-			return o, err
-		}
-		return Outcome{OK: true, TasksLeft: rn.tasksLeft(r)}, nil
-	case StepWork:
-		head, err := rn.Git.Head(ctx, r.Worktree)
-		if err != nil {
-			return Outcome{}, err
-		}
-		if head == r.Start && !goalMet {
-			o, _, err := rn.discard(ctx, r, "the session committed nothing")
-			return o, err
-		}
-		// Committing nothing with the goal judged met is a task an earlier
-		// one already did, which is done.
-		md, _ := rn.read(r, TasksFile)
-		if err := rn.write(ctx, r, TasksFile, TickTask(md, r.Task), fmt.Sprintf("run: task %d done", r.Task+1)); err != nil {
-			return Outcome{}, err
-		}
-		return Outcome{OK: true, TasksLeft: rn.tasksLeft(r)}, nil
-	case StepFix, StepCIFix:
-		if _, ok := rn.read(r, RevisionFile); ok {
-			return Outcome{OK: true, Revision: true}, nil
 		}
 	}
 	return Outcome{OK: true}, nil
@@ -1173,111 +878,9 @@ func (rn *Runner) perform(ctx context.Context, d Daemon, r *Run) (Outcome, error
 	switch r.Step {
 	case StepSetup:
 		return rn.setup(ctx, r), nil
-	case StepPlanReview:
-		if r.Skip {
-			return rn.skipped(ctx, r)
-		}
-		answer, err := rn.Claude.Ask(ctx, r.Worktree, PlanReviewPrompt(*r))
-		if err != nil {
-			return claudeFailed(err), nil
-		}
-		// An answer that neither revises the plan nor passes it is taken as
-		// passing it: the plan still gets its tasks, and verify is reviewed.
-		if text, changed, _ := ParseRewrite(answer, PlanFile, "NO CHANGES"); changed {
-			plan, _ := rn.read(r, PlanFile)
-			if err := rn.write(ctx, r, PlanFile, keepDecisions(plan, text), "run: plan revised by claude review"); err != nil {
-				return Outcome{}, err
-			}
-		}
-		return Outcome{OK: true}, nil
-	case StepVerifyReview:
-		if r.Skip {
-			return rn.skipped(ctx, r)
-		}
-		passed, output, err := rn.Shell.Verify(ctx, r.Worktree, r.File(VerifyFile), time.Duration(rn.Cfg.VerifyTimeout))
-		if err != nil {
-			return Outcome{Why: err.Error()}, nil
-		}
-		answer, err := rn.Claude.Ask(ctx, r.Worktree, VerifyReviewPrompt(*r, passed, output))
-		if err != nil {
-			return claudeFailed(err), nil
-		}
-		text, changed, ok := ParseRewrite(answer, VerifyFile, "APPROVED")
-		if !ok {
-			return Outcome{Why: "claude's review of verify.sh neither approved nor replaced it"}, nil
-		}
-		if changed {
-			if err := rn.write(ctx, r, VerifyFile, text, "run: verify.sh rewritten by claude review"); err != nil {
-				return Outcome{}, err
-			}
-		}
-		return Outcome{OK: true}, nil
-	case StepCheck:
-		passed, output, err := rn.Shell.Verify(ctx, r.Worktree, r.File(VerifyFile), time.Duration(rn.Cfg.VerifyTimeout))
-		if err != nil {
-			return Outcome{Why: err.Error()}, nil
-		}
-		r.Output = output
-		rn.logf("run %s: check %s", r.Home, map[bool]string{true: "passed", false: "failed"}[passed])
-		o := Outcome{OK: true, CheckPassed: passed}
-		if !passed {
-			o.Note = output
-		}
-		return o, nil
-	case StepRevise:
-		if r.Skip {
-			return rn.skipped(ctx, r)
-		}
-		answer, err := rn.Claude.Ask(ctx, r.Worktree, RevisePrompt(*r, r.Output))
-		if err != nil {
-			return claudeFailed(err), nil
-		}
-		text, changed, ok := ParseRewrite(answer, VerifyFile, "REFUSED")
-		if !ok {
-			return Outcome{Why: "claude's answer to the revision neither replaced verify.sh nor refused"}, nil
-		}
-		note := "Claude revised verify.sh."
-		if changed {
-			if err := rn.write(ctx, r, VerifyFile, text, "run: verify.sh revised by claude"); err != nil {
-				return Outcome{}, err
-			}
-		} else {
-			r.Advice = Refusal(answer)
-			note = "Claude kept verify.sh: " + r.Advice
-		}
-		if err := rn.Git.Remove(ctx, r.Worktree, "run: revision request answered", r.File(RevisionFile)); err != nil {
-			return Outcome{}, err
-		}
-		return Outcome{OK: true, Note: note}, nil
-	case StepReplanReview:
-		if r.Skip {
-			return rn.skipped(ctx, r)
-		}
-		answer, err := rn.Claude.Ask(ctx, r.Worktree, ReplanReviewPrompt(*r, rn.doing(r)))
-		if err != nil {
-			return claudeFailed(err), nil
-		}
-		finding, advice, ok := ParseReplan(answer)
-		if !ok {
-			return Outcome{Why: "claude's answer to the re-plan request was neither REPLAN nor REFUSED"}, nil
-		}
-		if finding != "" {
-			if err := rn.found(ctx, r, r.ReplanFrom, finding); err != nil {
-				return Outcome{}, err
-			}
-		}
-		if err := rn.Git.Remove(ctx, r.Worktree, "run: re-plan request answered", r.File(ReplanFile)); err != nil {
-			return Outcome{}, err
-		}
-		if finding != "" {
-			rn.logf("run %s: claude agrees the plan cannot work; planning again", r.Home)
-			return Outcome{OK: true, Replan: finding, Note: finding}, nil
-		}
-		rn.logf("run %s: claude says the plan can work", r.Home)
-		return Outcome{OK: true, Refused: advice, Note: advice}, nil
 	case StepFinalReview:
 		if r.Skip {
-			return rn.skipped(ctx, r)
+			return rn.skipped(r), nil
 		}
 		changed, err := rn.Git.Diffed(ctx, r.Worktree, r.Base)
 		if err != nil {
@@ -1291,7 +894,7 @@ func (rn *Runner) perform(ctx context.Context, d Daemon, r *Run) (Outcome, error
 		if !ok {
 			return Outcome{Why: "claude's final review was not in the form asked for"}, nil
 		}
-		r.Notes = notes
+		r.Notes, r.Blockers = notes, blockers
 		var note []string
 		if len(blockers) > 0 {
 			md, _ := rn.read(r, TasksFile)
@@ -1513,13 +1116,14 @@ func (rn *Runner) prBody(r *Run) string {
 		fmt.Fprintf(&b, "Closes #%d\n\n", r.Issue)
 	}
 	fmt.Fprintf(&b, "%s opened this from an orchestrated run.\n\n## Brief\n\n%s\n\n", github.Signature, strings.TrimSpace(r.Brief))
-	fmt.Fprintf(&b, "The plan is `%s` and the tasks are `%s`. `%s` passes", r.File(PlanFile), r.File(TasksFile), r.File(VerifyFile))
-	if r.Fixes > 0 {
-		fmt.Fprintf(&b, " after %d fix sessions", r.Fixes)
+	fmt.Fprintf(&b, "The plan is `%s` and the tasks are `%s`.", r.File(PlanFile), r.File(TasksFile))
+	if slices.Contains(r.Skipped, StepFinalReview) {
+		b.WriteString(" The owner skipped Claude's final review, so Claude did not review this work.\n")
+	} else {
+		b.WriteString(" Claude reviewed the finished work; any blockers it found were fixed before this PR.\n")
 	}
-	b.WriteString(reviewed(r.Skipped))
 	plan, _ := rn.read(r, PlanFile)
-	b.WriteString(decisionsForPR(plan, r.File(PlanFile), r.File(VerifyFile)))
+	b.WriteString(decisionsForPR(plan, r.File(PlanFile)))
 	if len(r.Notes) > 0 {
 		b.WriteString("\n## Notes from the final review\n\n")
 		for _, n := range r.Notes {
@@ -1527,39 +1131,6 @@ func (rn *Runner) prBody(r *Run) string {
 		}
 	}
 	b.WriteString("\n" + github.Marker + "\n")
-	return b.String()
-}
-
-// reviewed ends the PR's sentence about the check with what Claude reviewed,
-// and names each gate the owner skipped, so a PR never claims a review that
-// did not happen.
-func reviewed(skipped []Step) string {
-	if len(skipped) == 0 {
-		return ". Claude reviewed the plan, the check and the finished work; any blockers it found were fixed before this PR.\n"
-	}
-	var did []string
-	for _, g := range []struct {
-		step Step
-		what string
-	}{{StepPlanReview, "the plan"}, {StepVerifyReview, "the check"}, {StepFinalReview, "the finished work"}} {
-		if !slices.Contains(skipped, g.step) {
-			did = append(did, g.what)
-		}
-	}
-	var b strings.Builder
-	b.WriteString(".")
-	if len(did) > 0 {
-		fmt.Fprintf(&b, " Claude reviewed %s.", joinAnd(did))
-	}
-	names := make([]string, len(skipped))
-	for i, s := range skipped {
-		names[i] = string(s)
-	}
-	fmt.Fprintf(&b, " The owner skipped Claude at %s, so Claude did not review what those gates check.", strings.Join(names, ", "))
-	if !slices.Contains(skipped, StepFinalReview) {
-		b.WriteString(" Any blockers the final review found were fixed before this PR.")
-	}
-	b.WriteString("\n")
 	return b.String()
 }
 

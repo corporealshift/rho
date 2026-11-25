@@ -3,7 +3,6 @@ package runs
 import (
 	"context"
 	"encoding/json"
-	"time"
 
 	"github.com/corporealshift/rho/protocol"
 )
@@ -33,7 +32,7 @@ type Settings struct {
 
 // Daemon is the part of the protocol the runner uses. Like the watcher, it
 // never subscribes: with nobody subscribed a permission request is refused
-// at once, so a step session that reaches for the network finds out.
+// at once, so a run's session that reaches for the network finds out.
 type Daemon interface {
 	// Requested is every session carrying a label: run:requested, or
 	// goal:requested.
@@ -45,6 +44,8 @@ type Daemon interface {
 	// SetDescription sets a session's description, which starts nothing.
 	SetDescription(ctx context.Context, id, text string) error
 	SetGoal(ctx context.Context, id, condition string) error
+	// ClearGoal ends a session's active goal.
+	ClearGoal(ctx context.Context, id string) error
 	// Create makes a step's session with the given settings.
 	Create(ctx context.Context, workspace, parent string, maxTurns int, set Settings) (string, error)
 	// CreateHome makes a run's home under a goal's: a session that is never
@@ -114,14 +115,6 @@ type Claude interface {
 	// without it: the gates are the point.
 	Available() bool
 	Ask(ctx context.Context, dir, prompt string) (string, error)
-}
-
-// Shell runs the run's check.
-type Shell interface {
-	// Verify runs a script from dir. A script that fails, or runs past the
-	// timeout, is a failed check with its output, not an error; err is for a
-	// script that could not be run at all.
-	Verify(ctx context.Context, dir, script string, timeout time.Duration) (passed bool, output string, err error)
 }
 
 // UncleanError is a reset that put the tracked files back but left an

@@ -44,9 +44,7 @@ type RunStatus struct {
 	Goal      string      `json:"goal,omitempty"`
 	GoalTitle string      `json:"goal_title,omitempty"`
 	PR        StatusPR    `json:"pr"`
-	Fixes     int         `json:"fixes"`
 	CIFixes   int         `json:"ci_fixes"`
-	Revisions int         `json:"revisions"`
 	FailedAt  Step        `json:"failed_at,omitempty"`
 	Why       string      `json:"why,omitempty"`
 	History   []StatusRow `json:"history"`
@@ -64,7 +62,6 @@ type StatusPR struct {
 // StatusRow is one finished step: a Record without its note.
 type StatusRow struct {
 	Step    Step      `json:"step"`
-	Task    int       `json:"task,omitempty"`
 	Session string    `json:"session,omitempty"`
 	OK      bool      `json:"ok"`
 	Result  string    `json:"result,omitempty"`
@@ -101,23 +98,27 @@ type GoalStatusBrief struct {
 	Why      string `json:"why,omitempty"`
 }
 
-// NewRunStatus builds a run's snapshot. brief is the brief's text, tasks the
-// task titles once tasks.md exists, and goalTitle the goal's first line when
-// the run is one of a goal's.
-func NewRunStatus(r Run, brief string, tasks []string, goalTitle string) RunStatus {
-	if tasks == nil {
-		tasks = []string{}
+// NewRunStatus builds a run's snapshot. brief is the brief's text, tasks
+// tasks.md's tasks once it exists, and goalTitle the goal's first line when
+// the run is one of a goal's. During work, Task is the first task not yet
+// ticked.
+func NewRunStatus(r Run, brief string, tasks []Task, goalTitle string) RunStatus {
+	titles := []string{}
+	for _, t := range tasks {
+		titles = append(titles, t.Title)
 	}
 	s := RunStatus{
-		Version: StatusVersion, Title: titleOf(brief), Step: r.Step, Tasks: tasks,
+		Version: StatusVersion, Title: titleOf(brief), Step: r.Step, Tasks: titles,
 		Attempt: r.Attempt, Since: r.Since, Session: r.Session, Waiting: r.Waiting, Parked: cutText(r.Parked, statusText),
 		Goal: r.Goal, GoalTitle: goalTitle, PR: StatusPR{Number: r.PR, URL: r.PRURL},
-		Fixes: r.Fixes, CIFixes: r.CIFixes, Revisions: r.Revisions,
+		CIFixes:  r.CIFixes,
 		FailedAt: r.FailedAt, Why: cutText(r.Why, statusText),
 		History: []StatusRow{}, Brief: brief, Started: r.Started, Updated: r.Updated,
 	}
 	if r.Step == StepWork {
-		s.Task = r.Task + 1
+		if i, _ := NextTask(tasks); i >= 0 {
+			s.Task = i + 1
+		}
 	}
 	// A run saved before Since was kept began its step when the last one
 	// ended.
@@ -130,9 +131,6 @@ func NewRunStatus(r Run, brief string, tasks []string, goalTitle string) RunStat
 	for _, rec := range r.History {
 		row := StatusRow{Step: rec.Step, Session: rec.Session, OK: rec.OK,
 			Result: cutText(rec.Result, statusText), Why: cutText(rec.Why, statusText), At: rec.At}
-		if rec.Step == StepWork {
-			row.Task = rec.Task + 1
-		}
 		s.History = append(s.History, row)
 	}
 	return s
@@ -232,17 +230,12 @@ func (rn *Runner) show(ctx context.Context, d Daemon, r *Run) {
 	if text, ok := rn.read(r, BriefFile); ok && strings.TrimSpace(text) != "" {
 		brief = text
 	}
-	var titles []string
-	if tasks, err := rn.tasks(r); err == nil {
-		for _, t := range tasks {
-			titles = append(titles, t.Title)
-		}
-	}
+	tasks, _ := rn.tasks(r)
 	goalTitle := ""
 	if g := rn.goals[r.Goal]; g != nil {
 		goalTitle = firstLine(g.Text)
 	}
-	b, err := encodeRunStatus(NewRunStatus(*r, brief, titles, goalTitle))
+	b, err := encodeRunStatus(NewRunStatus(*r, brief, tasks, goalTitle))
 	if err != nil {
 		rn.logf("run %s: status: %v", r.Home, err)
 		return

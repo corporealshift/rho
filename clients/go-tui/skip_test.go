@@ -11,9 +11,10 @@ func TestSkipLabels(t *testing.T) {
 		have, want []string
 		why        string
 	}{
-		{have: []string{"mine", "run:plan-review"}, want: []string{"mine", "run:skip"}},
+		{have: []string{"mine", "run:final-review"}, want: []string{"mine", "run:skip"}},
+		{have: []string{"run:plan-review"}, why: "the run is at plan-review, which is not one of Claude's checks"},
 		{have: []string{"run:final-review"}, want: []string{"run:skip"}},
-		{have: []string{"run:check", "run:attempt:2/10"}, why: "the run is at check, which is not one of Claude's checks"},
+		{have: []string{"run:ci-fix", "run:attempt:2/5"}, why: "the run is at ci-fix, which is not one of Claude's checks"},
 		{have: []string{"goal:check", "goal:round:3"}, want: []string{"goal:skip"}},
 		{have: []string{"goal:breakdown"}, why: "only its check can be skipped"},
 		{have: []string{"mine"}, why: "for a run's or a goal's home"},
@@ -28,7 +29,7 @@ func TestSkipLabels(t *testing.T) {
 
 func TestSkipCommand(t *testing.T) {
 	m := newModel("S1", nil)
-	m.labels = []string{"mine", "run:verify-review"}
+	m.labels = []string{"mine", "run:final-review"}
 	if _, a := submit(t, m, "/skip"); a == nil || a.kind != actSkip || !reflect.DeepEqual(a.labels, []string{"mine", "run:skip"}) {
 		t.Fatalf("action = %+v", a)
 	}

@@ -9,7 +9,6 @@ import (
 	"go/token"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -223,33 +222,6 @@ func TestClaudeArgsAreReadOnly(t *testing.T) {
 	}
 	if (ClaudeCLI{Path: filepath.Join(t.TempDir(), "claude")}).Available() != true {
 		t.Error("a configured path is taken as given")
-	}
-}
-
-func TestBashVerify(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("no bash")
-	}
-	dir := t.TempDir()
-	write := func(name, body string) string {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		return name
-	}
-	ctx := context.Background()
-	if ok, out, err := (Bash{}).Verify(ctx, dir, write("pass.sh", "echo all good\n"), time.Minute); !ok || err != nil || !strings.Contains(out, "all good") {
-		t.Errorf("pass = %v, %q, %v", ok, out, err)
-	}
-	if ok, out, err := (Bash{}).Verify(ctx, dir, write("fail.sh", "echo broken >&2\nexit 3\n"), time.Minute); ok || err != nil || !strings.Contains(out, "broken") {
-		t.Errorf("fail = %v, %q, %v", ok, out, err)
-	}
-	if _, out, _ := (Bash{}).Verify(ctx, dir, write("long.sh", "for i in $(seq 1 5000); do echo line $i of a long run; done\n"), time.Minute); len(out) > maxCheckOutput+100 || !strings.Contains(out, "line 5000") {
-		t.Errorf("long output kept %d bytes, or lost its end", len(out))
-	}
-	ok, out, err := (Bash{}).Verify(ctx, dir, write("slow.sh", "sleep 30\n"), 500*time.Millisecond)
-	if ok || err != nil || !strings.Contains(out, "stopped after") {
-		t.Errorf("slow = %v, %q, %v", ok, out, err)
 	}
 }
 

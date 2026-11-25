@@ -4,8 +4,6 @@ import com.rho.client.data.parseInstant
 import com.rho.client.protocol.GoalStatus
 import com.rho.client.protocol.RhoJson
 import com.rho.client.protocol.RunStatus
-import com.rho.client.protocol.TreeMember
-import com.rho.client.protocol.TreeStats
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -47,17 +45,16 @@ class StatusPagesTest {
         assertEquals(run.history.size + 1, rows.size)
         assertEquals(1_000L, rows[0].millis) // setup, a second after the start
         assertEquals(93 * minute - 1_000L, rows[1].millis)
-        assertEquals("plan", rows[1].step)
-        assertEquals("01M4P8ENR4XCTQT7HMWDVSCWG8", rows[1].session)
-        assertEquals("asked for a revision of verify.sh", rows[4].result)
-        val failed = rows[5]
+        val failed = rows[1]
+        assertEquals("work", failed.step)
+        assertEquals("01M4P8ENR4XCTQT7HMWDVSCWG8", failed.session)
         assertEquals(false, failed.ok)
-        assertEquals(1, failed.task)
         assertTrue(failed.result.startsWith("the session ended paused"))
+        assertEquals("1 blockers", rows[3].result)
         val current = rows.last()
         assertNull(current.ok)
         assertEquals("work", current.step)
-        assertEquals(2, current.task)
+        assertEquals(3, current.task)
         assertEquals(42 * minute, current.millis)
     }
 
@@ -72,24 +69,14 @@ class StatusPagesTest {
     @Test
     fun `the step line says the task, the try and the time in the step`() {
         val now = parseInstant(run.since)!! + 42 * minute
-        assertEquals("work · task 2 of 3 · try 2 · 42m in this step", stepLine(run, now))
-        assertEquals("plan · 42m in this step", stepLine(run.copy(step = "plan", task = 0, attempt = 0), now))
+        assertEquals("work · task 3 of 3 · 42m in this step", stepLine(run, now))
+        assertEquals("work · task 3 of 3 · try 2 · 42m in this step", stepLine(run.copy(attempt = 1), now))
+        assertEquals("final-review · 42m in this step", stepLine(run.copy(step = "final-review", task = 0), now))
     }
 
     @Test
-    fun `turns are summed per task, with every try counted`() {
-        val tree = TreeStats(members = listOf(
-            TreeMember(sessionId = "01M4PFKEYY6GEREN9YBJ11GC6D", turns = 10),
-            TreeMember(sessionId = "01M4PFQCAXFW19C4PHD50DSQSM", turns = 20),
-            TreeMember(sessionId = "01M4P8ENR4XCTQT7HMWDVSCWG8", turns = 130),
-        ))
-        val bars = turnsPerTask(run, tree)
-        assertEquals(listOf(1, 2), bars.map { it.task })
-        assertEquals(TaskBar(1, "Notes in Room", 30, 2), bars[0])
-        assertEquals(TaskBar(2, "Notes in state", 20, 1), bars[1])
-        // Without the tree yet, the tries are still known.
-        assertEquals(listOf(0, 0), turnsPerTask(run, null).map { it.turns })
-        assertEquals(2, claudeGates(run))
+    fun `claude is counted at its gates`() {
+        assertEquals(1, claudeGates(run))
     }
 
     @Test

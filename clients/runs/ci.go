@@ -32,7 +32,7 @@ var (
 )
 
 // Classify is what a PR's checks add up to. Pending wins over failed, so one
-// fix session sees every failure at once rather than the first to finish.
+// ci-fix prompt shows every failure at once rather than the first to finish.
 func Classify(checks []Check) string {
 	if len(checks) == 0 {
 		return CINone

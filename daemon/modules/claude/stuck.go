@@ -116,9 +116,8 @@ func question(log []protocol.Event, commands []string) string {
 }
 
 // PlanVerdict opens an answer that says the task cannot be done as it is set
-// out (docs/specs/2026-10-12-run-replan-design.md). The runner, which reads
-// the answer in a step session's log, keeps its own copy: a client does not
-// import a module.
+// out (docs/specs/2026-10-12-run-replan-design.md), so the model reading it
+// stops pushing on the approach rather than taking it as one more hint.
 const PlanVerdict = "PLAN CANNOT WORK"
 
 // whatToDo is the question's last section: what Claude is asked for.

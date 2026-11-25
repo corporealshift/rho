@@ -1,20 +1,19 @@
 {
   "version": 1,
   "title": "In-Flight notes: data, state and actions (no UI)",
-  "step": "plan-review",
+  "step": "final-review",
   "tasks": [],
   "attempt": 0,
-  "since": "2026-10-11T17:26:44Z",
+  "since": "2026-10-11T17:58:44Z",
+  "session": "01M4PFQCAXFW19C4PHD50DSQSM",
   "waiting": false,
   "parked": "You've hit your weekly limit · resets 2pm",
   "goal": "01M498J1N9D785RFV6AZBRZN7G",
   "pr": {
-    "number": 41,
-    "url": "https://github.com/o/r/pull/41"
+    "number": 0,
+    "url": ""
   },
-  "fixes": 1,
   "ci_fixes": 0,
-  "revisions": 1,
   "history": [
     {
       "step": "setup",
@@ -22,10 +21,17 @@
       "at": "2026-10-11T15:53:45Z"
     },
     {
-      "step": "plan",
+      "step": "work",
       "session": "01M4P8ENR4XCTQT7HMWDVSCWG8",
-      "ok": true,
+      "ok": false,
+      "why": "the session ended paused and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more and more an…",
       "at": "2026-10-11T17:26:44Z"
+    },
+    {
+      "step": "work",
+      "session": "01M4PFQCAXFW19C4PHD50DSQSM",
+      "ok": true,
+      "at": "2026-10-11T17:58:44Z"
     }
   ],
   "brief": "# In-Flight notes: data, state and actions (no UI)\n\nAdd the data side.\n",

@@ -24,19 +24,11 @@ func (g *rig) askGoal(id, text string) {
 
 func (g *rig) goal(id string) *Goal { return g.rn.goals[id] }
 
-// work takes the run of a goal that has just started through planning, its
-// two tasks, and its PR, as its sessions would.
+// work takes the run of a goal that has just started through its work and
+// its PR, as its session would.
 func (g *rig) work(r *Run) {
 	g.t.Helper()
-	g.finish(map[string]string{r.File(PlanFile): "# Plan\n"})
-	g.tick()
-	g.finish(map[string]string{r.File(VerifyFile): "go test ./...\n"})
-	g.tick()
-	g.finish(map[string]string{r.File(TasksFile): twoTasks})
-	g.tick()
-	g.finish(map[string]string{"stats.go": "x"})
-	g.tick()
-	g.finish(map[string]string{"stats_test.go": "x"})
+	g.doAll(r, "# Plan\n")
 	g.tick()
 	if r.Step != StepDone {
 		g.t.Fatalf("run %s ended at %q (%s)\nlog:\n%s", r.Home, r.Step, r.Why, g.log.String())
@@ -108,7 +100,7 @@ func TestAWholeGoal(t *testing.T) {
 	if len(g.gh.merged) != 2 {
 		t.Errorf("merged %v", g.gh.merged)
 	}
-	if want := []string{"breakdown", "plan", "verify", "final", "plan", "verify", "final", "check"}; !slices.Equal(g.claude.asked, want) {
+	if want := []string{"breakdown", "final", "final", "check"}; !slices.Equal(g.claude.asked, want) {
 		t.Errorf("claude was asked %q", g.claude.asked)
 	}
 
@@ -167,7 +159,7 @@ func TestAFailedRunIsReplannedThenBlocksThenResumes(t *testing.T) {
 	g.tick()
 	goal := g.goal("G1")
 
-	failRun(g.currentRun(goal), StepPlan, "no plan.md")
+	failRun(g.currentRun(goal), StepWork, "no plan.md")
 	g.tick()
 	if goal.Step != GoalRuns || goal.Round != 2 || goal.Failures != 1 {
 		t.Fatalf("after one failure the goal = %+v", goal)
@@ -176,13 +168,13 @@ func TestAFailedRunIsReplannedThenBlocksThenResumes(t *testing.T) {
 		t.Errorf("briefs = %+v", goal.Briefs)
 	}
 	check := g.claude.prompts["check"][0]
-	for _, s := range []string{"the run failed at its plan step: no plan.md", "**Mode**: not started", "Do not give the same brief again"} {
+	for _, s := range []string{"the run failed at its work step: no plan.md", "**Mode**: not started", "Do not give the same brief again"} {
 		if !strings.Contains(check, s) {
 			t.Errorf("the check was not told %q:\n%s", s, check)
 		}
 	}
 
-	failRun(g.currentRun(goal), StepFix, "still fails")
+	failRun(g.currentRun(goal), StepCIFix, "still fails")
 	g.tick()
 	if goal.Step != GoalBlocked || goal.BlockedAt != GoalRuns || !strings.Contains(goal.Why, "still fails") {
 		t.Fatalf("after two failures the goal = %+v", goal)
@@ -245,7 +237,7 @@ func TestARestartMidRoundCarriesOn(t *testing.T) {
 		t.Errorf("after a restart the goal has run homes %q", kids)
 	}
 	goal := g.goal("G1")
-	if goal.Step != GoalRuns || g.currentRun(goal).Step != StepPlan {
+	if goal.Step != GoalRuns || g.currentRun(goal).Step != StepWork {
 		t.Errorf("goal = %+v", goal)
 	}
 }

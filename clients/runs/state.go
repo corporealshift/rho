@@ -1,15 +1,15 @@
 // Package runs is the runner behind `rho runner`: it takes a brief to a green
-// pull request through a fixed sequence of named steps, starting one short
-// session for each step that needs the model, doing the mechanical steps
-// itself, and asking Claude at three gates
-// (docs/specs/2026-09-30-orchestrated-runs-design.md). It also drives goals:
+// pull request. One session does the run's work: it plans, writes its tasks
+// and carries them out, and the same session is prompted again for the final
+// review's blockers, for failing CI and for the reflection. The runner does
+// the mechanical steps itself and asks Claude for the final review
+// (docs/specs/2026-11-25-single-session-runs-design.md). It also drives goals:
 // a broad goal Claude breaks into briefs, worked as runs one after another on
 // a goal branch, and checked until it is met (goal*.go,
 // docs/specs/2026-10-06-goals-design.md).
 //
-// The order is this package's code, never the model's choice. The local model
-// does badly at long tasks and at following a workflow it was only told
-// about, so each session gets one step, one file to produce, and nothing else.
+// The order of the steps around the work is this package's code; the order
+// of the work itself is the session's, written down in plan.md and tasks.md.
 //
 // It is a client, like the GitHub watcher: it imports goclient, the watcher's
 // helpers and protocol, never the daemon. boundary_test.go enforces that.
@@ -30,26 +30,16 @@ import (
 type Step string
 
 const (
-	StepSetup        Step = "setup"
-	StepBrief        Step = "brief"
-	StepPlan         Step = "plan"
-	StepPlanReview   Step = "plan-review"
-	StepVerify       Step = "verify"
-	StepVerifyReview Step = "verify-review"
-	StepTasks        Step = "tasks"
-	StepWork         Step = "work"
-	StepCheck        Step = "check"
-	StepFix          Step = "fix"
-	StepRevise       Step = "revise"
-	StepFinalReview  Step = "final-review"
-	StepPR           Step = "pr"
-	StepCI           Step = "ci"
-	StepCIFix        Step = "ci-fix"
-	StepPush         Step = "push"
-	StepMerge        Step = "merge"
-	// StepReplanReview is Claude judging a session's claim that the plan
-	// cannot work (docs/specs/2026-10-12-run-replan-design.md).
-	StepReplanReview Step = "replan-review"
+	StepSetup Step = "setup"
+	// StepWork is the session planning, writing its tasks and doing them; it
+	// comes back here to do the final review's blockers.
+	StepWork        Step = "work"
+	StepFinalReview Step = "final-review"
+	StepPR          Step = "pr"
+	StepCI          Step = "ci"
+	StepCIFix       Step = "ci-fix"
+	StepPush        Step = "push"
+	StepMerge       Step = "merge"
 	// StepReflect is the run looking back before it ends, done or failed
 	// (docs/specs/2026-10-11-run-reflection-design.md).
 	StepReflect Step = "reflect"
@@ -57,26 +47,30 @@ const (
 	StepFailed  Step = "failed"
 )
 
-// Session reports whether a step is done by a model session.
+// Session reports whether a step is done by the run's session.
 func (s Step) Session() bool {
 	switch s {
-	case StepBrief, StepPlan, StepTasks, StepVerify, StepWork, StepFix, StepCIFix, StepReflect:
+	case StepWork, StepCIFix, StepReflect:
 		return true
 	}
 	return false
 }
 
 // Claude reports whether a step is one of Claude's gates.
-func (s Step) Claude() bool {
+func (s Step) Claude() bool { return s == StepFinalReview }
+
+// Over reports whether a run has finished, either way.
+func (s Step) Over() bool { return s == StepDone || s == StepFailed }
+
+// known reports whether a step is one this runner has. A run saved by the
+// runner before it was one session can be at a step that is gone.
+func (s Step) known() bool {
 	switch s {
-	case StepPlanReview, StepVerifyReview, StepRevise, StepFinalReview, StepReplanReview:
+	case StepSetup, StepWork, StepFinalReview, StepPR, StepCI, StepCIFix, StepPush, StepMerge, StepReflect, StepDone, StepFailed:
 		return true
 	}
 	return false
 }
-
-// Over reports whether a run has finished, either way.
-func (s Step) Over() bool { return s == StepDone || s == StepFailed }
 
 // Run is one brief on its way to a pull request.
 type Run struct {
@@ -95,21 +89,22 @@ type Run struct {
 	// (docs/specs/2026-10-06-goals-design.md).
 	Goal string `json:"goal,omitempty"`
 	// Brief is the text the run was given, when it was given one; empty
-	// means the brief step writes it from the home's conversation.
+	// means the session writes it from the home's conversation first.
 	Brief string `json:"brief,omitempty"`
 
 	Step     Step   `json:"step"`
 	FailedAt Step   `json:"failed_at,omitempty"`
 	Why      string `json:"why,omitempty"`
-	// Attempt counts failed tries of the current step, or of the current
-	// task during work. It starts again whenever the step or task changes.
+	// Attempt counts failed tries of the current step. It starts again
+	// whenever the step changes.
 	Attempt       int  `json:"attempt,omitempty"`
-	Fixes         int  `json:"fixes,omitempty"`
 	CIFixes       int  `json:"ci_fixes,omitempty"`
-	Revisions     int  `json:"revisions,omitempty"`
 	FinalReviewed bool `json:"final_reviewed,omitempty"`
+	// Blockers is what the final review found, for the session's next
+	// prompt; empty once it has been passed on.
+	Blockers []Blocker `json:"blockers,omitempty"`
 
-	// Waiting means the current step needs a session and has no slot yet.
+	// Waiting means the current step needs the session and has no slot yet.
 	Waiting bool `json:"waiting,omitempty"`
 	// Parked is why the current Claude gate is waiting for Claude, which is
 	// not answering; empty when it is not
@@ -120,40 +115,28 @@ type Run struct {
 	// (docs/specs/2026-10-13-claude-park-and-skip-design.md).
 	Skip    bool   `json:"skip,omitempty"`
 	Skipped []Step `json:"skipped,omitempty"`
-	// Session is the current step's session, and Start the commit the
-	// worktree was at when it began.
-	Session  string `json:"session,omitempty"`
+	// Session is the run's one session. It outlives the steps: each step
+	// that needs the model prompts it again, and it is stopped when the run
+	// ends. A new one is made only when it has ended some other way.
+	Session string `json:"session,omitempty"`
+	// Start is the commit the worktree was at when the current step's prompt
+	// was sent. Prompted is whether it has been sent, and Stopped whether
+	// the step has taken the session's answer as final.
 	Start    string `json:"start,omitempty"`
 	Prompted bool   `json:"prompted,omitempty"`
 	Stopped  bool   `json:"stopped,omitempty"`
-	// NudgedAt is how long the session's log was when it was told it had
-	// stopped short; zero until then. A session is told once.
+	// Fresh is a session made for the run and not prompted yet: it has
+	// nothing of the run in its context, so it is told where things stand.
+	Fresh bool `json:"fresh,omitempty"`
+	// NudgedAt is how long the session's log was when it was last told it
+	// had stopped short, and Nudges how many times it has been told during
+	// the current step.
 	NudgedAt int `json:"nudged_at,omitempty"`
+	Nudges   int `json:"nudges,omitempty"`
 
-	// Task is the task a work session is doing, by its index in tasks.md.
-	Task int `json:"task,omitempty"`
-	// Output is the end of the last check's output, for the fix session and
-	// for Claude.
+	// Output is the last CI failure, for the ci-fix prompt.
 	Output string `json:"output,omitempty"`
-	// Advice is what Claude said when it refused to change the check, for
-	// the next fix session.
-	Advice string `json:"advice,omitempty"`
 
-	// Replans counts the times the run went back to plan because the plan
-	// could not work, and Refusals the times Claude disagreed that it could
-	// not (docs/specs/2026-10-12-run-replan-design.md).
-	Replans  int `json:"replans,omitempty"`
-	Refusals int `json:"refusals,omitempty"`
-	// ReplanFrom is the step whose session claimed the plan cannot work,
-	// and ReplanAdvice what Claude said when it disagreed, for that step's
-	// next session.
-	ReplanFrom   Step   `json:"replan_from,omitempty"`
-	ReplanAdvice string `json:"replan_advice,omitempty"`
-	// Finding is Claude's automatic verdict that the plan cannot work, read
-	// from the running session's log and acted on once the session stops.
-	Finding string `json:"finding,omitempty"`
-	// Seen is the id of the last event read from the running session's log.
-	Seen string `json:"seen,omitempty"`
 	// Labelled is the run label last put on the home, so it is set only when
 	// it changes.
 	Labelled string `json:"labelled,omitempty"`
@@ -175,8 +158,8 @@ type Run struct {
 	// reflection (docs/specs/2026-10-11-run-reflection-design.md).
 	History []Record `json:"history,omitempty"`
 
-	// Since is when the current step began, or during work the current
-	// task; SinceKey is the step and task it was taken for. Statused is the
+	// Since is when the current step began; SinceKey is the step it was
+	// taken for. Statused is the
 	// fingerprint of the status last set on the home, so it is set only when
 	// it changes (status.go).
 	Since    time.Time `json:"since,omitzero"`
@@ -190,23 +173,21 @@ type Run struct {
 // Record is one finished step: which, the session that did it, if any, and
 // what came of it.
 type Record struct {
-	Step Step `json:"step"`
-	// Task is the task a work step did, by its index in tasks.md.
-	Task    int    `json:"task,omitempty"`
+	Step    Step   `json:"step"`
 	Session string `json:"session,omitempty"`
 	OK      bool   `json:"ok"`
 	Why     string `json:"why,omitempty"`
-	// Result is what a step that judges found: the check passed or failed,
-	// how many blockers the final review found, what CI said.
+	// Result is what a step that judges found: how many blockers the final
+	// review found, what CI said.
 	Result string `json:"result,omitempty"`
-	// Note is what the step found worth passing on: a failing check's
-	// output, the final review's blockers, Claude's refusal, a CI failure.
+	// Note is what the step found worth passing on: the final review's
+	// blockers, a CI failure.
 	Note string    `json:"note,omitempty"`
 	At   time.Time `json:"at"`
 }
 
-// The bounds on a run's history: a fix loop of failing checks would
-// otherwise carry every output in full.
+// The bounds on a run's history: a loop of CI failures would otherwise carry
+// every log in full.
 const (
 	maxNote    = 2000
 	maxHistory = 200
@@ -227,19 +208,13 @@ func (r Run) Dir() string { return filepath.ToSlash(filepath.Join(".rho", "runs"
 // File is one of the run's files, relative to the worktree.
 func (r Run) File(name string) string { return r.Dir() + "/" + name }
 
-// The run's files.
+// The run's files. The session writes the brief, when it was given none, the
+// plan and the tasks; the runner adds the final review's blockers to the
+// tasks.
 const (
-	BriefFile    = "brief.md"
-	PlanFile     = "plan.md"
-	TasksFile    = "tasks.md"
-	VerifyFile   = "verify.sh"
-	RevisionFile = "verify-revision.md"
-	// ReplanFile is a session's claim that the plan cannot work, and
-	// FindingsFile every claim Claude agreed with, for the planner.
-	ReplanFile   = "replan-request.md"
-	FindingsFile = "findings.md"
-	// MapFile is the run's notes on the code, kept by the planning steps.
-	MapFile = "map.md"
+	BriefFile = "brief.md"
+	PlanFile  = "plan.md"
+	TasksFile = "tasks.md"
 )
 
 // RunsDir holds one state file per run.

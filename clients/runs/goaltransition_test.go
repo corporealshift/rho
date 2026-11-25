@@ -51,14 +51,14 @@ func TestGoalTransition(t *testing.T) {
 					t.Errorf("failures = %d", g.Failures)
 				}
 			}},
-		{name: "a failed run ends the round early", from: twoBriefs(), o: GoalOutcome{OK: true, Run: RunFailed, FailedAt: StepFix, RunWhy: "still fails"}, want: GoalCheck,
+		{name: "a failed run ends the round early", from: twoBriefs(), o: GoalOutcome{OK: true, Run: RunFailed, FailedAt: StepCIFix, RunWhy: "still fails"}, want: GoalCheck,
 			check: func(t *testing.T, g Goal) {
-				if g.Briefs[0].State != BriefFailed || g.Briefs[0].FailedAt != StepFix || g.Briefs[1].State != BriefDropped || g.Failures != 1 {
+				if g.Briefs[0].State != BriefFailed || g.Briefs[0].FailedAt != StepCIFix || g.Briefs[1].State != BriefDropped || g.Failures != 1 {
 					t.Errorf("goal = %+v", g)
 				}
 			}},
 		{name: "a second failure in a row blocks", from: func() Goal { g := twoBriefs(); g.Failures = 1; return g }(),
-			o: GoalOutcome{OK: true, Run: RunFailed, FailedAt: StepPlan, RunWhy: "no plan"}, want: GoalBlocked,
+			o: GoalOutcome{OK: true, Run: RunFailed, FailedAt: StepWork, RunWhy: "no plan"}, want: GoalBlocked,
 			check: func(t *testing.T, g Goal) {
 				if g.BlockedAt != GoalRuns || !strings.Contains(g.Why, "no plan") {
 					t.Errorf("blocked at %q: %q", g.BlockedAt, g.Why)

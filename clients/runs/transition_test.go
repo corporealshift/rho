@@ -2,15 +2,14 @@ package runs
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 )
 
 func at(s Step) Run { return Run{Home: "H", Step: s} }
 
-// sessionHistory is a history in which a session did some of the run's work.
-var sessionHistory = []Record{{Step: StepSetup, OK: true}, {Step: StepPlan, Session: "S1", OK: true}}
+// sessionHistory is a history in which the session did some of the run's work.
+var sessionHistory = []Record{{Step: StepSetup, OK: true}, {Step: StepWork, Session: "S1", OK: true}}
 
 func TestTransition(t *testing.T) {
 	ok := Outcome{OK: true}
@@ -23,56 +22,19 @@ func TestTransition(t *testing.T) {
 		// check looks at more than the step, when it matters.
 		check func(t *testing.T, r Run)
 	}{
-		{name: "setup with a brief goes to plan", from: Run{Step: StepSetup, Brief: "add x"}, o: ok, want: StepPlan},
-		{name: "setup without one goes to brief", from: at(StepSetup), o: ok, want: StepBrief},
-		{name: "brief", from: at(StepBrief), o: ok, want: StepPlan},
-		{name: "plan", from: at(StepPlan), o: ok, want: StepPlanReview},
-		// The check comes before the tasks, so the tasks can carry every test it
-		// names (docs/specs/2026-10-09-verify-before-tasks-design.md).
-		{name: "plan-review", from: at(StepPlanReview), o: ok, want: StepVerify},
-		{name: "verify", from: at(StepVerify), o: ok, want: StepVerifyReview},
-		{name: "verify-review", from: at(StepVerifyReview), o: ok, want: StepTasks},
-		{name: "tasks", from: at(StepTasks), o: Outcome{OK: true, TasksLeft: 3}, want: StepWork},
-		{name: "tasks with none left", from: at(StepTasks), o: ok, want: StepCheck},
-		{name: "work, more tasks", from: Run{Step: StepWork, Attempt: 1}, o: Outcome{OK: true, TasksLeft: 2}, want: StepWork,
+		{name: "setup goes to work", from: at(StepSetup), o: ok, want: StepWork,
 			check: func(t *testing.T, r Run) {
-				if r.Attempt != 0 || !r.Waiting {
-					t.Errorf("a new task should start fresh and wait for a slot: %+v", r)
+				if !r.Waiting {
+					t.Errorf("work waits for a slot: %+v", r)
 				}
 			}},
-		{name: "work, last task", from: at(StepWork), o: ok, want: StepCheck},
-		{name: "check passes, not yet reviewed", from: at(StepCheck), o: Outcome{OK: true, CheckPassed: true}, want: StepFinalReview},
-		{name: "check passes, reviewed", from: Run{Step: StepCheck, FinalReviewed: true}, o: Outcome{OK: true, CheckPassed: true}, want: StepPR},
-		{name: "check fails", from: at(StepCheck), o: ok, want: StepFix,
-			check: func(t *testing.T, r Run) {
-				if r.Fixes != 1 {
-					t.Errorf("fixes = %d", r.Fixes)
-				}
-			}},
-		{name: "check fails at the cap", from: Run{Step: StepCheck, Fixes: MaxFixes}, o: ok, want: StepFailed,
-			check: func(t *testing.T, r Run) {
-				if r.FailedAt != StepFix || r.Why == "" {
-					t.Errorf("failed at %q, why %q", r.FailedAt, r.Why)
-				}
-			}},
-		{name: "fix goes back to check", from: at(StepFix), o: ok, want: StepCheck},
-		{name: "fix asks for a revision", from: at(StepFix), o: Outcome{OK: true, Revision: true}, want: StepRevise},
-		{name: "fix asks for a third revision", from: Run{Step: StepFix, Revisions: MaxRevisions}, o: Outcome{OK: true, Revision: true}, want: StepFailed,
-			check: func(t *testing.T, r Run) {
-				if r.FailedAt != StepRevise {
-					t.Errorf("failed at %q", r.FailedAt)
-				}
-			}},
-		{name: "revise", from: at(StepRevise), o: ok, want: StepCheck,
-			check: func(t *testing.T, r Run) {
-				if r.Revisions != 1 {
-					t.Errorf("revisions = %d", r.Revisions)
-				}
-			}},
+		{name: "work goes to the final review", from: at(StepWork), o: ok, want: StepFinalReview},
+		{name: "work after the review goes to the PR", from: Run{Step: StepWork, FinalReviewed: true}, o: ok, want: StepPR},
+		{name: "work with a PR open goes up to it", from: Run{Step: StepWork, FinalReviewed: true, PR: 7}, o: ok, want: StepPush},
 		{name: "final review with blockers", from: at(StepFinalReview), o: Outcome{OK: true, Blockers: 2}, want: StepWork,
 			check: func(t *testing.T, r Run) {
-				if !r.FinalReviewed {
-					t.Error("the final review happens once")
+				if !r.FinalReviewed || !r.Waiting {
+					t.Errorf("the final review happens once, and work waits for a slot: %+v", r)
 				}
 			}},
 		{name: "final review clean", from: at(StepFinalReview), o: ok, want: StepPR},
@@ -114,109 +76,42 @@ func TestTransition(t *testing.T) {
 			}},
 		{name: "a ci poll that errors is tried ten times", from: Run{Step: StepCI, Attempt: 8}, o: failed, want: StepCI},
 		{name: "and fails on the tenth", from: Run{Step: StepCI, Attempt: 9}, o: failed, want: StepFailed},
-		{name: "ci-fix goes to check", from: at(StepCIFix), o: ok, want: StepCheck},
-		{name: "ci-fix may ask for a revision", from: at(StepCIFix), o: Outcome{OK: true, Revision: true}, want: StepRevise},
-		{name: "check passes with a PR open", from: Run{Step: StepCheck, PR: 7, FinalReviewed: true}, o: Outcome{OK: true, CheckPassed: true}, want: StepPush},
+		{name: "ci-fix goes to push", from: at(StepCIFix), o: ok, want: StepPush},
 		{name: "push goes to ci", from: at(StepPush), o: ok, want: StepCI},
 
-		// A session may say the plan cannot work
-		// (docs/specs/2026-10-12-run-replan-design.md).
-		{name: "work claims the plan cannot work", from: Run{Step: StepWork, Task: 2}, o: Outcome{OK: true, ReplanRequest: true}, want: StepReplanReview,
-			check: func(t *testing.T, r Run) {
-				if r.ReplanFrom != StepWork || r.Task != 2 || r.Waiting {
-					t.Errorf("run = %+v", r)
-				}
-			}},
-		{name: "fix claims it", from: at(StepFix), o: Outcome{OK: true, ReplanRequest: true}, want: StepReplanReview},
-		{name: "ci-fix claims it", from: at(StepCIFix), o: Outcome{OK: true, ReplanRequest: true}, want: StepReplanReview},
-		{name: "a planning step cannot claim it", from: at(StepTasks), o: Outcome{OK: true, ReplanRequest: true, TasksLeft: 2}, want: StepWork},
-		{name: "claude agrees: back to plan", from: Run{Step: StepReplanReview, ReplanFrom: StepWork, FinalReviewed: true, Fixes: 4, Revisions: 1, Advice: "a"},
-			o: Outcome{OK: true, Replan: "Room cannot run on the JVM"}, want: StepPlan,
-			check: func(t *testing.T, r Run) {
-				if r.Replans != 1 || r.FinalReviewed || r.Fixes != 0 || r.Revisions != 0 || r.Advice != "" || !r.Waiting {
-					t.Errorf("a re-plan starts the plan over: %+v", r)
-				}
-			}},
-		{name: "claude agrees past the cap", from: Run{Step: StepReplanReview, ReplanFrom: StepWork, Replans: MaxReplans},
-			o: Outcome{OK: true, Replan: "still impossible"}, want: StepFailed,
-			check: func(t *testing.T, r Run) {
-				if r.FailedAt != StepPlan || !strings.Contains(r.Why, "still impossible") {
-					t.Errorf("failed at %q: %q", r.FailedAt, r.Why)
-				}
-			}},
-		{name: "claude disagrees: back to the step that claimed", from: Run{Step: StepReplanReview, ReplanFrom: StepFix, Task: 1},
-			o: Outcome{OK: true, Refused: "the mock is in testFixtures"}, want: StepFix,
-			check: func(t *testing.T, r Run) {
-				if r.Refusals != 1 || r.ReplanAdvice != "the mock is in testFixtures" || r.Attempt != 0 || !r.Waiting {
-					t.Errorf("run = %+v", r)
-				}
-			}},
-		{name: "claude disagrees past the cap", from: Run{Step: StepReplanReview, ReplanFrom: StepWork, Refusals: MaxRefusals},
-			o: Outcome{OK: true, Refused: "it can"}, want: StepFailed,
-			check: func(t *testing.T, r Run) {
-				if r.FailedAt != StepWork || !strings.Contains(r.Why, "Claude disagreed") {
-					t.Errorf("failed at %q: %q", r.FailedAt, r.Why)
-				}
-			}},
-		{name: "an automatic verdict re-plans with no review", from: at(StepWork), o: Outcome{OK: true, Replan: "the API does not exist"}, want: StepPlan,
-			check: func(t *testing.T, r Run) {
-				if r.Replans != 1 {
-					t.Errorf("replans = %d", r.Replans)
-				}
-			}},
-		{name: "a step that does its job spends its advice", from: Run{Step: StepWork, ReplanAdvice: "x"}, o: ok, want: StepCheck,
-			check: func(t *testing.T, r Run) {
-				if r.ReplanAdvice != "" {
-					t.Errorf("advice = %q", r.ReplanAdvice)
-				}
-			}},
-		{name: "a retry keeps its advice", from: Run{Step: StepWork, ReplanAdvice: "x"}, o: failed, want: StepWork,
-			check: func(t *testing.T, r Run) {
-				if r.ReplanAdvice != "x" {
-					t.Errorf("advice = %q", r.ReplanAdvice)
-				}
-			}},
-		{name: "a review that did not parse is tried again", from: Run{Step: StepReplanReview, ReplanFrom: StepWork}, o: failed, want: StepReplanReview},
-		{name: "a new step forgets the session's cursor and verdict", from: Run{Step: StepWork, Seen: "e9", Finding: "f"}, o: Outcome{OK: true, Replan: "f"}, want: StepPlan,
-			check: func(t *testing.T, r Run) {
-				if r.Seen != "" || r.Finding != "" {
-					t.Errorf("run = %+v", r)
-				}
-			}},
-
-		{name: "a session step is retried once", from: at(StepPlan), o: failed, want: StepPlan,
+		{name: "a session step is retried once", from: at(StepWork), o: failed, want: StepWork,
 			check: func(t *testing.T, r Run) {
 				if r.Attempt != 1 || !r.Waiting {
 					t.Errorf("retry: %+v", r)
 				}
 			}},
-		{name: "then fails", from: Run{Step: StepPlan, Attempt: 1}, o: failed, want: StepFailed,
+		{name: "then fails", from: Run{Step: StepWork, Attempt: 1}, o: failed, want: StepFailed,
 			check: func(t *testing.T, r Run) {
-				if r.FailedAt != StepPlan || r.Why != "no plan.md" {
+				if r.FailedAt != StepWork || r.Why != "no plan.md" {
 					t.Errorf("failed at %q, why %q", r.FailedAt, r.Why)
 				}
 			}},
-		{name: "a claude gate gets three tries", from: Run{Step: StepVerifyReview, Attempt: 1}, o: failed, want: StepVerifyReview},
-		{name: "and fails on the third", from: Run{Step: StepVerifyReview, Attempt: 2}, o: failed, want: StepFailed},
-		{name: "claude not answering parks a gate", from: Run{Step: StepPlanReview, Attempt: 2}, o: Outcome{Wait: true, Parked: "limit"}, want: StepPlanReview,
+		{name: "a claude gate gets three tries", from: Run{Step: StepFinalReview, Attempt: 1}, o: failed, want: StepFinalReview},
+		{name: "and fails on the third", from: Run{Step: StepFinalReview, Attempt: 2}, o: failed, want: StepFailed},
+		{name: "claude not answering parks a gate", from: Run{Step: StepFinalReview, Attempt: 2}, o: Outcome{Wait: true, Parked: "limit"}, want: StepFinalReview,
 			check: func(t *testing.T, r Run) {
 				if r.Attempt != 2 || r.Parked != "limit" {
 					t.Errorf("run = %+v", r)
 				}
 			}},
-		{name: "an answer ends the park", from: Run{Step: StepPlanReview, Parked: "limit"}, o: ok, want: StepVerify,
+		{name: "an answer ends the park", from: Run{Step: StepFinalReview, Parked: "limit"}, o: ok, want: StepPR,
 			check: func(t *testing.T, r Run) {
 				if r.Parked != "" {
 					t.Errorf("still parked: %q", r.Parked)
 				}
 			}},
-		{name: "a skip is spent at its gate", from: Run{Step: StepPlanReview, Skip: true, Parked: "limit"}, o: Outcome{OK: true, Skipped: true}, want: StepVerify,
+		{name: "a skip is spent at its gate", from: Run{Step: StepFinalReview, Skip: true, Parked: "limit"}, o: Outcome{OK: true, Skipped: true}, want: StepPR,
 			check: func(t *testing.T, r Run) {
 				if r.Skip || r.Parked != "" {
 					t.Errorf("run = %+v", r)
 				}
 			}},
-		{name: "so does a failed try", from: Run{Step: StepPlanReview, Parked: "limit"}, o: failed, want: StepPlanReview,
+		{name: "so does a failed try", from: Run{Step: StepFinalReview, Parked: "limit"}, o: failed, want: StepFinalReview,
 			check: func(t *testing.T, r Run) {
 				if r.Parked != "" || r.Attempt != 1 {
 					t.Errorf("run = %+v", r)
@@ -224,25 +119,25 @@ func TestTransition(t *testing.T) {
 			}},
 		{name: "the pr gets three tries", from: Run{Step: StepPR, Attempt: 2}, o: failed, want: StepFailed},
 		{name: "a finished run stays finished", from: at(StepDone), o: failed, want: StepDone},
-		// A run reflects before it ends, when a session did any of its work
+		// A run reflects before it ends, when its session did any of its work
 		// (docs/specs/2026-10-11-run-reflection-design.md).
-		{name: "ci passes after sessions: reflect", from: Run{Step: StepCI, History: sessionHistory}, o: Outcome{OK: true, CI: CIPass}, want: StepReflect,
+		{name: "ci passes after work: reflect", from: Run{Step: StepCI, History: sessionHistory}, o: Outcome{OK: true, CI: CIPass}, want: StepReflect,
 			check: func(t *testing.T, r Run) {
 				if r.FailedAt != "" || !r.Waiting {
 					t.Errorf("a reflection waits for a slot, and a merged run is no failure: %+v", r)
 				}
 			}},
-		{name: "merge after sessions: reflect", from: Run{Step: StepMerge, Goal: "G", History: sessionHistory}, o: ok, want: StepReflect},
-		{name: "a failure after sessions reflects first", from: Run{Step: StepCheck, Fixes: MaxFixes, History: sessionHistory}, o: ok, want: StepReflect,
+		{name: "merge after work: reflect", from: Run{Step: StepMerge, Goal: "G", History: sessionHistory}, o: ok, want: StepReflect},
+		{name: "a failure after work reflects first", from: Run{Step: StepCI, CIFixes: MaxCIFixes, History: sessionHistory}, o: Outcome{OK: true, CI: CIFail}, want: StepReflect,
 			check: func(t *testing.T, r Run) {
-				if r.FailedAt != StepFix || r.Why == "" {
+				if r.FailedAt != StepCIFix || r.Why == "" {
 					t.Errorf("the failure is recorded before the reflection: failed at %q, why %q", r.FailedAt, r.Why)
 				}
 			}},
 		{name: "a reflection ends a merged run", from: Run{Step: StepReflect, History: sessionHistory}, o: ok, want: StepDone},
-		{name: "a reflection ends a failed run as it failed", from: Run{Step: StepReflect, FailedAt: StepFix, Why: "still failing", History: sessionHistory}, o: ok, want: StepFailed,
+		{name: "a reflection ends a failed run as it failed", from: Run{Step: StepReflect, FailedAt: StepCIFix, Why: "still failing", History: sessionHistory}, o: ok, want: StepFailed,
 			check: func(t *testing.T, r Run) {
-				if r.FailedAt != StepFix || r.Why != "still failing" {
+				if r.FailedAt != StepCIFix || r.Why != "still failing" {
 					t.Errorf("failed at %q, why %q", r.FailedAt, r.Why)
 				}
 			}},
@@ -253,10 +148,12 @@ func TestTransition(t *testing.T) {
 					t.Errorf("why = %q: the reflection's own failure replaced the run's", r.Why)
 				}
 			}},
-		{name: "a new step clears the session", from: Run{Step: StepPlan, Session: "S", Start: "abc", Prompted: true, Stopped: true}, o: ok, want: StepPlanReview,
+		// The run's session outlives its steps; only the step's own state goes.
+		{name: "a new step keeps the session", from: Run{Step: StepWork, Session: "S", Start: "abc", Prompted: true, Stopped: true, NudgedAt: 9, Nudges: 2},
+			o: ok, want: StepFinalReview,
 			check: func(t *testing.T, r Run) {
-				if r.Session != "" || r.Start != "" || r.Prompted || r.Stopped || r.Waiting {
-					t.Errorf("session left behind: %+v", r)
+				if r.Session != "S" || r.Start != "" || r.Prompted || r.Stopped || r.NudgedAt != 0 || r.Nudges != 0 || r.Waiting {
+					t.Errorf("run = %+v", r)
 				}
 			}},
 	}
@@ -273,13 +170,12 @@ func TestTransition(t *testing.T) {
 	}
 }
 
-// Blockers go back to work once: the second time the run passes its check,
-// it goes to the PR without another review.
+// Blockers go back to work once: the second time the work is done, it goes to
+// the PR without another review.
 func TestBlockersBounceOnce(t *testing.T) {
 	r := at(StepFinalReview)
 	r = Transition(r, Outcome{OK: true, Blockers: 1})
-	r = Transition(r, Outcome{OK: true})                    // the blocker's task
-	r = Transition(r, Outcome{OK: true, CheckPassed: true}) // check
+	r = Transition(r, Outcome{OK: true}) // the blockers' work
 	if r.Step != StepPR {
 		t.Errorf("after the blockers the run went to %q, want pr", r.Step)
 	}
@@ -289,41 +185,52 @@ func TestResume(t *testing.T) {
 	tests := []struct {
 		failedAt Step
 		want     Step
-		check    func(t *testing.T, r Run)
 	}{
-		{StepPlan, StepPlan, nil},
-		{StepWork, StepWork, nil},
-		{StepReplanReview, StepReplanReview, nil},
-		{StepFix, StepCheck, func(t *testing.T, r Run) {
-			if r.Fixes != 0 {
-				t.Errorf("fixes = %d", r.Fixes)
-			}
-		}},
-		{StepCIFix, StepCI, func(t *testing.T, r Run) {
-			if r.CIFixes != 0 {
-				t.Errorf("ci fixes = %d", r.CIFixes)
-			}
-		}},
-		{StepRevise, StepRevise, func(t *testing.T, r Run) {
-			if r.Revisions != 0 {
-				t.Errorf("revisions = %d", r.Revisions)
-			}
-		}},
+		{StepWork, StepWork},
+		{StepFinalReview, StepFinalReview},
+		{StepPR, StepPR},
+		{StepCIFix, StepCI},
+		// Steps the runner had before it was one session.
+		{"verify", StepWork},
+		{"fix", StepWork},
+		{"replan-review", StepWork},
 	}
 	for _, tt := range tests {
-		r := Run{Step: StepFailed, FailedAt: tt.failedAt, Why: "x", Attempt: 2, Fixes: MaxFixes, Revisions: MaxRevisions, CIFixes: MaxCIFixes,
-			Replans: MaxReplans + 1, Refusals: MaxRefusals}
+		r := Run{Step: StepFailed, FailedAt: tt.failedAt, Why: "x", Attempt: 2, CIFixes: MaxCIFixes, Session: "S"}
 		got := Resume(r)
-		if got.Step != tt.want || got.FailedAt != "" || got.Why != "" || got.Attempt != 0 || got.Waiting != tt.want.Session() ||
-			got.Replans != 0 || got.Refusals != 0 {
+		if got.Step != tt.want || got.FailedAt != "" || got.Why != "" || got.Attempt != 0 || got.Waiting != tt.want.Session() || got.Session != "S" {
 			t.Errorf("resume from %q = %+v", tt.failedAt, got)
 		}
-		if tt.check != nil {
-			tt.check(t, got)
+		if tt.failedAt == StepCIFix && got.CIFixes != 0 {
+			t.Errorf("ci fixes = %d", got.CIFixes)
 		}
 	}
 	if r := Resume(at(StepWork)); r.Step != StepWork {
 		t.Error("resuming a run that has not failed changed it")
+	}
+}
+
+func TestUpgrade(t *testing.T) {
+	for _, tt := range []struct {
+		from Run
+		want Step
+	}{
+		{Run{Step: "plan", Session: "OLD"}, StepWork},
+		{Run{Step: "check", Session: "OLD"}, StepWork},
+		{Run{Step: "check", PR: 7}, StepCI},
+		{Run{Step: StepWork, Session: "S"}, StepWork},
+		{Run{Step: StepFailed, FailedAt: "verify"}, StepFailed},
+	} {
+		got := upgrade(tt.from)
+		if got.Step != tt.want {
+			t.Errorf("upgrade(%q) = %q, want %q", tt.from.Step, got.Step, tt.want)
+		}
+		if !tt.from.Step.known() && got.Step == StepWork && (got.Session != "" || !got.Waiting) {
+			t.Errorf("an old step's session does one step, so work starts a new one: %+v", got)
+		}
+		if tt.from.Step == StepWork && got.Session != "S" {
+			t.Errorf("a run at work keeps its session: %+v", got)
+		}
 	}
 }
 
@@ -333,7 +240,7 @@ func TestRunRoundTrip(t *testing.T) {
 		t.Fatalf("missing run: %v, %v", ok, err)
 	}
 	r := Run{Home: "H", Workspace: "C:/src/x", Slug: "add-x-0001", Branch: "rho/add-x-0001", Worktree: "w",
-		Step: StepFix, Fixes: 3, Session: "S1", Start: "abc", Notes: []string{"n"},
+		Step: StepCIFix, CIFixes: 3, Session: "S1", Start: "abc", Notes: []string{"n"}, Blockers: []Blocker{{Title: "t", Detail: "d"}},
 		Started: time.Date(2026, 9, 30, 1, 0, 0, 0, time.UTC), Updated: time.Date(2026, 9, 30, 2, 0, 0, 0, time.UTC)}
 	if err := r.Save(root); err != nil {
 		t.Fatal(err)

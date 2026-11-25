@@ -12,7 +12,7 @@ The daemon rejects unknown fields in `config.json`, so a typo fails at startup i
 of doing nothing. The daemon and the runner read their files once, when they start, so
 restart them after a change. Restart the daemon only when no session is running. A
 session that is running when the daemon stops is paused, and the runner counts a paused
-step session as a failed one.
+run session as a failed try: a new session carries on from what it committed.
 
 The README has a [recommended setup](../README.md#recommended-setup-qwen36-35b-a3b) for a
 local model. This page lists every setting.
@@ -295,14 +295,12 @@ phone, hand work to it. With `github/config.json` present, it does the GitHub jo
 It needs `git`, `gh`, and the `claude` CLI. A run never skips its reviews, so without
 `claude` the runner won't start a run or a goal.
 
-- **A run** takes one brief through fixed steps. Each step is its own session:
-  1. brief and plan, which Claude reviews;
-  2. `verify.sh`, the check that says when the brief is done, written before any code and
-     reviewed by Claude;
-  3. tasks, then one session per task;
-  4. the check, and fixes until it passes;
-  5. a final review by Claude;
-  6. a pull request, fixed until CI is green.
+- **A run** takes one brief to a pull request in one session. The session writes the
+  plan (`plan.md`) and the tasks (`tasks.md`), then does the tasks, ticking each as it
+  commits it. Claude then reviews the finished work; any blockers go back to the same
+  session as new tasks. The runner opens the pull request, and CI failures go back to the
+  same session until CI is green. Last, the session saves what the run taught it to
+  memory.
 - **A goal** is broader. Claude breaks it into briefs, runs them one after another, and
   checks the result. Each round's check plans the next round from whatever is still
   missing, until the goal is met.
@@ -314,17 +312,19 @@ It needs `git`, `gh`, and the `claude` CLI. A run never skips its reviews, so wi
   "poll": "2m",
   "max_jobs": 1,
   "label": "rho",
-  "verify_timeout": "30m",
   "claude": { "path": "", "model": "", "timeout": "15m" },
-  "plan_turns": 0,
-  "work_turns": 0,
+  "turns": 0,
+  "effort": "",
   "goal_rounds": 5
 }
 ```
 
-- **`plan_turns`** caps brief, plan, tasks and verify sessions. **`work_turns`** caps
-  work, fix and CI-fix sessions. 0 means no cap. A session that hits its cap is a failed
-  try. Its commits are thrown away, and the step is tried once more.
+- **`turns`** caps the run's session over the whole run. 0 means no cap. A session that
+  hits its cap is a failed try: its commits stay, and a new session carries on from them.
+  A session that ends its turn with tasks left is told what is left, up to three times,
+  before that counts as a failed try. Each step gets two tries.
+- **`effort`** is the run's session's effort, when its home has none. Empty leaves it to
+  the server.
 - **`goal_rounds`** is how many rounds a goal gets before it blocks and waits for you.
   When one run fails, the rest of its round is dropped and the goal goes to its check. So
   on the last round, a single failure blocks the goal. To resume a blocked goal, send

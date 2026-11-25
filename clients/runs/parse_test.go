@@ -48,15 +48,8 @@ func TestParseTasks(t *testing.T) {
 	}
 }
 
-func TestTickAndAppendTasks(t *testing.T) {
-	md := TickTask(tasksMD, 3)
-	if !strings.Contains(md, "    - [x] nested items are tasks as well") || !strings.Contains(md, "- [ ] Add the cache type") {
-		t.Errorf("tick:\n%s", md)
-	}
-	if TickTask(tasksMD, 9) != tasksMD {
-		t.Error("ticking a task that does not exist changed the file")
-	}
-	md = AppendTasks(md, []Blocker{{Title: "Handle a nil reader", Detail: "Get panics on a nil reader.\nAdd a test."}})
+func TestAppendTasks(t *testing.T) {
+	md := AppendTasks(tasksMD, []Blocker{{Title: "Handle a nil reader", Detail: "Get panics on a nil reader.\nAdd a test."}})
 	tasks := ParseTasks(md)
 	last := tasks[len(tasks)-1]
 	if last.Title != "Handle a nil reader" || last.Done || last.Detail != "Get panics on a nil reader.\nAdd a test." {
@@ -64,73 +57,6 @@ func TestTickAndAppendTasks(t *testing.T) {
 	}
 	if next, _ := NextTask(tasks); tasks[next].Title != "Add the cache type" {
 		t.Errorf("next = %q", tasks[next].Title)
-	}
-}
-
-func TestParseRewrite(t *testing.T) {
-	plan := "# Plan\n\n```go\nfunc f() {}\n```\n"
-	tests := []struct {
-		name, answer string
-		text         string
-		changed, ok  bool
-	}{
-		{name: "a rewrite, fences and all", answer: "Some changes.\n" + Begin(PlanFile) + "\n" + plan + End(PlanFile) + "\nThat's it.",
-			text: plan, changed: true, ok: true},
-		{name: "the sentinel", answer: "NO CHANGES", ok: true},
-		{name: "the sentinel in bold", answer: "Looks right to me.\n\n**NO CHANGES**", ok: true},
-		{name: "a rewrite wins over the sentinel", answer: "NO CHANGES to the approach, but\n" + Begin(PlanFile) + "\nnew\n" + End(PlanFile),
-			text: "new\n", changed: true, ok: true},
-		{name: "neither", answer: "The plan is mostly fine but I would reorder steps."},
-		{name: "an unterminated rewrite", answer: Begin(PlanFile) + "\nhalf a plan"},
-		{name: "crlf", answer: Begin(PlanFile) + "\r\nline\r\n" + End(PlanFile), text: "line\n", changed: true, ok: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			text, changed, ok := ParseRewrite(tt.answer, PlanFile, "NO CHANGES")
-			if text != tt.text || changed != tt.changed || ok != tt.ok {
-				t.Errorf("ParseRewrite = %q, %v, %v; want %q, %v, %v", text, changed, ok, tt.text, tt.changed, tt.ok)
-			}
-		})
-	}
-	if _, _, ok := ParseRewrite("APPROVED", VerifyFile, "APPROVED"); !ok {
-		t.Error("APPROVED not read")
-	}
-}
-
-func TestRefusal(t *testing.T) {
-	if got := Refusal("REFUSED: the test is right; Median sorts in place and mutates its input."); got != "the test is right; Median sorts in place and mutates its input." {
-		t.Errorf("refusal = %q", got)
-	}
-	if Refusal("fine") != "" {
-		t.Error("no refusal read as one")
-	}
-}
-
-func TestParseReplan(t *testing.T) {
-	tests := []struct {
-		name, answer    string
-		finding, advice string
-		ok              bool
-	}{
-		{name: "replan on its line", answer: "REPLAN\nRoom's in-memory database needs Robolectric here.\nUse a fake DAO.",
-			finding: "Room's in-memory database needs Robolectric here.\nUse a fake DAO.", ok: true},
-		{name: "replan with a colon", answer: "REPLAN: the endpoint does not exist", finding: "the endpoint does not exist", ok: true},
-		{name: "after a preamble, in bold", answer: "I read the plan and the tests.\n\n**REPLAN** — no emulator on CI.", finding: "no emulator on CI.", ok: true},
-		{name: "refused", answer: "REFUSED: the fixture is in src/testFixtures.", advice: "the fixture is in src/testFixtures.", ok: true},
-		{name: "refused with nothing more", answer: "REFUSED", ok: true},
-		{name: "windows line endings", answer: "REPLAN\r\nno such API\r\n", finding: "no such API", ok: true},
-		{name: "replan with no finding", answer: "REPLAN", ok: false},
-		{name: "a longer word is not the verdict", answer: "REPLANNING would not help here.", ok: false},
-		{name: "neither", answer: "The plan looks fine to me.", ok: false},
-		{name: "empty", answer: "", ok: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			finding, advice, ok := ParseReplan(tt.answer)
-			if finding != tt.finding || advice != tt.advice || ok != tt.ok {
-				t.Errorf("ParseReplan = %q, %q, %v; want %q, %q, %v", finding, advice, ok, tt.finding, tt.advice, tt.ok)
-			}
-		})
 	}
 }
 
@@ -191,33 +117,18 @@ func TestDecisionsSection(t *testing.T) {
 	}
 }
 
-func TestKeepDecisions(t *testing.T) {
-	plan := "# Plan\n\n## Decisions\n\n- Touching ranges merge.\n"
-	if got := keepDecisions(plan, "# Plan\nrevised\n"); !strings.Contains(got, "revised") ||
-		!strings.Contains(got, "## Decisions\n\n_The review's rewrite left this section out") || !strings.HasSuffix(got, "- Touching ranges merge.\n") {
-		t.Errorf("a dropped section is not put back: %q", got)
-	}
-	kept := "# Plan\n\n## Decisions\n\n- Touching ranges stay apart.\n  Changed by review: the plan chose merge.\n"
-	if got := keepDecisions(plan, kept); got != kept {
-		t.Errorf("a rewrite with its own section was changed: %q", got)
-	}
-	if got := keepDecisions("# Plan\n", "# Plan\nrevised\n"); got != "# Plan\nrevised\n" {
-		t.Errorf("a plan with no decisions gained a section: %q", got)
-	}
-}
-
 func TestDecisionsForPR(t *testing.T) {
-	got := decisionsForPR("## Decisions\n\n- Touching ranges merge.\n", "p/plan.md", "p/verify.sh")
-	if !strings.Contains(got, "## Decisions this run made\n\n- Touching ranges merge.\n\nWhere `p/verify.sh` tests one, the test's comment names it. To change one, say so in a comment on this PR.") {
+	got := decisionsForPR("## Decisions\n\n- Touching ranges merge.\n", "p/plan.md")
+	if !strings.Contains(got, "## Decisions this run made\n\n- Touching ranges merge.\n\nTo change one, say so in a comment on this PR.") {
 		t.Errorf("with decisions: %q", got)
 	}
 	for _, plan := range []string{"# Plan\n", "## Decisions\n\n## Next\n"} {
-		if got := decisionsForPR(plan, "p/plan.md", "p/verify.sh"); !strings.Contains(got, "The plan recorded no open decisions.") || strings.Contains(got, "tests one") {
+		if got := decisionsForPR(plan, "p/plan.md"); !strings.Contains(got, "The plan recorded no open decisions.") || strings.Contains(got, "To change one") {
 			t.Errorf("%q: %q", plan, got)
 		}
 	}
 	long := "## Decisions\n\n" + strings.Repeat("- a decision that goes on\n", 2000)
-	got = decisionsForPR(long, "p/plan.md", "p/verify.sh")
+	got = decisionsForPR(long, "p/plan.md")
 	if len(got) > maxDecisions+500 || !strings.Contains(got, "Cut here; the rest is in `p/plan.md`") || strings.Contains(got, "- a decision that goes on\n\n_Cut") == false {
 		t.Errorf("a long section is not cut at a line: %d bytes, ends %q", len(got), got[len(got)-200:])
 	}
