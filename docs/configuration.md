@@ -134,6 +134,27 @@ than exposing the port. Phone notifications are set up in [android.md](android.m
 
 Each module has a block under `modules`. All of them are optional.
 
+### `instructions`: `rho.md`
+
+Put a `rho.md` in a repository to tell rho how the project works: the build command,
+where the toolchain lives, which files not to read whole. Every session in that
+repository gets it in front of the model, at the start and again after each summary.
+Commit it, and it's reviewed and versioned with the code it describes.
+
+```json
+{ "modules": { "instructions": { "max_bytes": 16384 } } }
+```
+
+- The name is matched ignoring case, so `RHO.md` works too. rho reads no other file:
+  not `CLAUDE.md`, not `AGENTS.md`.
+- The search starts in the session's workspace and walks up to the repository root, so
+  a subdirectory's file wins over the root's, and a worktree reads its own branch's
+  copy. Outside a repository, only the workspace itself is searched.
+- **`max_bytes`** caps what the file costs in every request, 16 KB by default. A longer
+  file is cut, and the model is told where to read the rest.
+- An edit during a session reaches the model at its next summary, not at once: the
+  prefix stays put between summaries so the server's prompt cache keeps working.
+
 ### `verify`: your test command
 
 ```json

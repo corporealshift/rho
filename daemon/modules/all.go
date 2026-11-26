@@ -8,6 +8,7 @@ import (
 	"github.com/corporealshift/rho/daemon/modules/claude"
 	"github.com/corporealshift/rho/daemon/modules/clock"
 	"github.com/corporealshift/rho/daemon/modules/guard"
+	"github.com/corporealshift/rho/daemon/modules/instructions"
 	"github.com/corporealshift/rho/daemon/modules/loop"
 	"github.com/corporealshift/rho/daemon/modules/memory"
 	"github.com/corporealshift/rho/daemon/modules/notes"
@@ -28,6 +29,7 @@ import (
 var All = []module.Module{
 	&skills.Module{},
 	&clock.Module{},
+	&instructions.Module{},
 	&prompt.Module{},
 	&ask.Module{},
 	&claude.Module{},
