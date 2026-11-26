@@ -56,7 +56,9 @@ type Daemon interface {
 	UpdateTasks(ctx context.Context, id string, tasks []protocol.Task) error
 	// SetStatus sets a home's status: the run's or goal's snapshot, encoded.
 	SetStatus(ctx context.Context, id, kind string, data json.RawMessage) error
-	SendPrompt(ctx context.Context, id, text string) error
+	// SendPrompt sends text as the n-th prompt the run has sent. The same
+	// text and n are one message however often they are sent.
+	SendPrompt(ctx context.Context, id, text string, n int) error
 	State(ctx context.Context, id string) (protocol.State, error)
 	Events(ctx context.Context, id string) ([]protocol.Event, error)
 	// EventsAfter is the events after the one with id after, or all of

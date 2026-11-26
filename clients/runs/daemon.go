@@ -165,14 +165,15 @@ func (c Client) SetStatus(ctx context.Context, id, kind string, data json.RawMes
 	return c.C.CallInto(ctx, "rho.session.set_status", map[string]any{"session_id": id, "kind": kind, "data": data}, nil)
 }
 
-// SendPrompt sends a message with a client_id made from its text, so sending
-// the same one again after a restart appends nothing (spec §7.4), while a
-// different one, such as a nudge after the first prompt, is a message of its
-// own.
-func (c Client) SendPrompt(ctx context.Context, id, text string) error {
+// SendPrompt sends a message with a client_id made from n and its text, so
+// sending the same one again after a restart appends nothing (spec §7.4),
+// while a later one is a message of its own even when its text is the same:
+// a second identical nudge was once dropped as a resend, and the runner
+// waited for an answer to it for good.
+func (c Client) SendPrompt(ctx context.Context, id, text string, n int) error {
 	sum := sha256.Sum256([]byte(text))
 	return c.C.CallInto(ctx, "rho.session.send_prompt",
-		map[string]any{"session_id": id, "content": text, "client_id": "rho-runner-" + hex.EncodeToString(sum[:8])}, nil)
+		map[string]any{"session_id": id, "content": text, "client_id": fmt.Sprintf("rho-runner-%d-%s", n, hex.EncodeToString(sum[:8]))}, nil)
 }
 
 func (c Client) State(ctx context.Context, id string) (protocol.State, error) {
