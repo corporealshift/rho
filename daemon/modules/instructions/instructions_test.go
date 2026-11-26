@@ -47,9 +47,8 @@ func TestFind(t *testing.T) {
 	tests := []struct {
 		name  string
 		files map[string]string
-		ws    string   // workspace, relative to the root
-		names []string // nil means the default
-		want  string   // relative to the root, "" for none
+		ws    string // workspace, relative to the root
+		want  string // relative to the root, "" for none
 	}{
 		{
 			name:  "repo root",
@@ -92,14 +91,14 @@ func TestFind(t *testing.T) {
 			ws:    "home", want: "home/RHO.md",
 		},
 		{
-			name:  "CLAUDE.md is not read by default",
+			name:  "CLAUDE.md is not read",
 			files: map[string]string{".git/": "", "CLAUDE.md": "x"},
 			ws:    ".", want: "",
 		},
 		{
-			name:  "configured order: the first name found wins in a directory",
-			files: map[string]string{".git/": "", "CLAUDE.md": "c", "AGENTS.md": "a"},
-			ws:    ".", names: []string{"RHO.md", "AGENTS.md", "CLAUDE.md"}, want: "AGENTS.md",
+			name:  "AGENTS.md is not read",
+			files: map[string]string{".git/": "", "AGENTS.md": "x"},
+			ws:    ".", want: "",
 		},
 		{
 			name:  "a directory with the name is not a file",
@@ -110,11 +109,7 @@ func TestFind(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			root := tree(t, tt.files)
-			names := tt.names
-			if names == nil {
-				names = defaultFiles
-			}
-			got := Find(filepath.Join(root, filepath.FromSlash(tt.ws)), names)
+			got := Find(filepath.Join(root, filepath.FromSlash(tt.ws)))
 			want := ""
 			if tt.want != "" {
 				want = filepath.Join(root, filepath.FromSlash(tt.want))
@@ -153,16 +148,9 @@ func TestBlocks(t *testing.T) {
 			cfg:   module.Config{"enabled": false},
 		},
 		{
-			name:  "configured files",
-			files: map[string]string{".git/": "", "AGENTS.md": "agents say hi"},
-			cfg:   module.Config{"files": []any{"RHO.md", "AGENTS.md"}},
-			want:  []string{"From `AGENTS.md`", "agents say hi"},
-		},
-		{
-			name:  "a path in files is ignored",
-			files: map[string]string{".git/": "", "docs/RHO.md": "nested", "RHO.md": "root"},
-			cfg:   module.Config{"files": []any{"docs/RHO.md"}},
-			want:  []string{"root"}, notWant: []string{"nested"},
+			name:  "named as it is on disk",
+			files: map[string]string{".git/": "", "rho.md": "lower case"},
+			want:  []string{"From `rho.md`", "lower case"},
 		},
 		{
 			name:    "cut at max_bytes, and says so",

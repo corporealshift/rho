@@ -1,20 +1,20 @@
 // Package instructions puts a repository's own instructions for agents in
-// front of the model: RHO.md by default, the file a person writes to tell rho
-// how their project works.
+// front of the model: rho.md, the file a person writes to tell rho how their
+// project works.
 //
 // Claude Code reads CLAUDE.md, and other agents read AGENTS.md, but rho read
 // nothing of the kind. What a repository wanted every session to know went
 // into memory by hand, where it lived outside the repository and was neither
-// reviewed nor versioned with the code it described. RHO.md is that file in
-// the repository. `files` can name others, so a repository that already keeps
-// an AGENTS.md or CLAUDE.md need not copy it.
+// reviewed nor versioned with the code it described. rho.md is that file in
+// the repository. It is the only name read: one file with one name is easier
+// to find, and to know is in effect, than a list of fallbacks.
 //
 // # Which file
 //
 // The search starts at the session's workspace and walks up to the repository
-// root, the first directory holding .git. In each directory the names in
-// `files` are tried in order, ignoring case, and the first file found is the
-// one used. So a subdirectory's RHO.md wins over the root's, and a worktree
+// root, the first directory holding .git, looking in each directory for
+// rho.md in any case (RHO.md, Rho.md). The first found is the one used. So a
+// subdirectory's rho.md wins over the root's, and a worktree
 // reads its own branch's copy. Outside a repository only the workspace itself
 // is searched: walking up from a home directory would find whatever happens to
 // sit above it.
@@ -43,13 +43,12 @@ import (
 // are worse than none it believes complete.
 const defaultMaxBytes = 16 << 10
 
-// defaultFiles is what is looked for when the config names nothing.
-var defaultFiles = []string{"RHO.md"}
+// FileName is the file looked for, ignoring case.
+const FileName = "rho.md"
 
 // Module is the instructions module.
 type Module struct {
 	enabled  bool
-	files    []string
 	maxBytes int
 	log      interface{ Warn(string, ...any) }
 }
@@ -58,17 +57,6 @@ func (m *Module) Name() string { return "instructions" }
 
 func (m *Module) Init(h module.Host, cfg module.Config) error {
 	m.enabled = cfg.Enabled()
-	m.files = nil
-	for _, f := range cfg.Strings("files", defaultFiles) {
-		// A name only: a path would let the config read outside the
-		// directories being searched.
-		if f = strings.TrimSpace(f); f != "" && filepath.Base(f) == f {
-			m.files = append(m.files, f)
-		}
-	}
-	if len(m.files) == 0 {
-		m.files = defaultFiles
-	}
 	if m.maxBytes = cfg.Int("max_bytes", defaultMaxBytes); m.maxBytes <= 0 {
 		m.maxBytes = defaultMaxBytes
 	}
@@ -103,7 +91,7 @@ func (m *Module) blocks(s module.Session) []module.ContextBlock {
 	if ws == "" {
 		return nil
 	}
-	path := Find(ws, m.files)
+	path := Find(ws)
 	if path == "" {
 		return nil
 	}
@@ -121,11 +109,11 @@ func (m *Module) blocks(s module.Session) []module.ContextBlock {
 
 // Find returns the instructions file for a workspace, or "" when there is
 // none. See the package comment for the search.
-func Find(ws string, names []string) string {
+func Find(ws string) string {
 	ws = filepath.Clean(ws)
 	root := repoRoot(ws)
 	for dir := ws; ; {
-		if p := match(dir, names); p != "" {
+		if p := match(dir); p != "" {
 			return p
 		}
 		if root == "" || dir == root {
@@ -154,22 +142,20 @@ func repoRoot(dir string) string {
 	}
 }
 
-// match returns the first of names present in dir as a regular file, ignoring
-// case, so RHO.md, rho.md and Rho.md are all found on a case-sensitive disk.
-func match(dir string, names []string) string {
+// match returns rho.md in dir as a regular file, ignoring case, so RHO.md,
+// rho.md and Rho.md are all found on a case-sensitive disk.
+func match(dir string) string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
 	}
-	for _, name := range names {
-		for _, e := range entries {
-			if !strings.EqualFold(e.Name(), name) {
-				continue
-			}
-			p := filepath.Join(dir, e.Name())
-			if info, err := os.Stat(p); err == nil && info.Mode().IsRegular() {
-				return p
-			}
+	for _, e := range entries {
+		if !strings.EqualFold(e.Name(), FileName) {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if info, err := os.Stat(p); err == nil && info.Mode().IsRegular() {
+			return p
 		}
 	}
 	return ""

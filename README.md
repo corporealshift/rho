@@ -36,7 +36,7 @@ failures.
   on. Reattach from the terminal UI or your phone, answer the agent's questions from
   either, and get a notification when a run finishes or needs you.
 - **It remembers.** A curator keeps facts worth keeping in a git-backed memory, and the
-  agent keeps working notes that carry a task across sessions and then expire. A `RHO.md`
+  agent keeps working notes that carry a task across sessions and then expire. A `rho.md`
   in a repository tells every session there how the project works.
 - **You own it.** It's one binary with no runtime to install, and it builds for Windows,
   macOS and Linux. There's no plugin system: policy is Go modules compiled in, so to
