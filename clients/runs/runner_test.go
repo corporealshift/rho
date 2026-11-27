@@ -36,7 +36,9 @@ type fakeSession struct {
 	workspace, parent, context, effort string
 	turns                              int
 	goals, prompts                     []string
-	state                              protocol.SessionState
+	// sent is each prompt's dedup key, as the daemon's client_id.
+	sent  map[string]bool
+	state protocol.SessionState
 	// log is the session's messages: a user one per prompt, an assistant
 	// one per finish.
 	log []protocol.Event
@@ -167,8 +169,18 @@ func (d *fakeDaemon) UpdateTasks(_ context.Context, id string, tasks []protocol.
 	return nil
 }
 
-func (d *fakeDaemon) SendPrompt(_ context.Context, id, text string) error {
+// SendPrompt deduplicates as the daemon does by client_id: the same text
+// and n again appends nothing.
+func (d *fakeDaemon) SendPrompt(_ context.Context, id, text string, n int) error {
 	s := d.sessions[id]
+	key := fmt.Sprintf("%d\x00%s", n, text)
+	if s.sent[key] {
+		return nil
+	}
+	if s.sent == nil {
+		s.sent = map[string]bool{}
+	}
+	s.sent[key] = true
 	s.prompts = append(s.prompts, text)
 	s.say("user", text)
 	s.state = protocol.StateRunning
@@ -736,6 +748,40 @@ func TestNudgesAreCappedThenTheSessionIsAskedAgain(t *testing.T) {
 	}
 	if r.Step != StepFailed || r.FailedAt != StepWork {
 		t.Errorf("run = %+v", r)
+	}
+}
+
+// Two nudges with the same text are two messages. Seen live: the second was
+// taken for a resend of the first and dropped, and the runner waited for an
+// answer to it for good.
+func TestASecondIdenticalNudgeIsStillSent(t *testing.T) {
+	g := newRig(t)
+	r := g.started("H1")
+	s := g.d.sessions["S1"]
+	g.finish(nil)
+	g.tick()
+	g.finish(nil)
+	g.tick()
+	if len(s.prompts) != 3 || s.prompts[1] != s.prompts[2] || r.Nudges != 2 {
+		t.Fatalf("prompts = %q, run = %+v", s.prompts, r)
+	}
+	if s.state != protocol.StateRunning {
+		t.Errorf("the second nudge did not reach the session: %s", s.state)
+	}
+}
+
+// The same prompt sent again after a restart, before the run was saved,
+// is still deduplicated.
+func TestAPromptResentAfterARestartIsNotAppendedTwice(t *testing.T) {
+	g := newRig(t)
+	r := g.started("H1")
+	s := g.d.sessions["S1"]
+	before := len(s.prompts)
+	if err := g.d.SendPrompt(context.Background(), "S1", s.prompts[before-1], r.Sent-1); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.prompts) != before {
+		t.Errorf("prompts = %q", s.prompts)
 	}
 }
 

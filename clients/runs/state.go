@@ -133,6 +133,11 @@ type Run struct {
 	// the current step.
 	NudgedAt int `json:"nudged_at,omitempty"`
 	Nudges   int `json:"nudges,omitempty"`
+	// Sent counts the prompts the runner has sent the run's sessions. It
+	// only grows, and goes into each prompt's client_id, so two prompts with
+	// the same text are still two messages, while resending one after a
+	// restart (Sent not yet saved) is still deduplicated.
+	Sent int `json:"sent,omitempty"`
 
 	// Output is the last CI failure, for the ci-fix prompt.
 	Output string `json:"output,omitempty"`

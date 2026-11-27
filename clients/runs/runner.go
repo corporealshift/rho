@@ -543,10 +543,10 @@ func (rn *Runner) send(ctx context.Context, d Daemon, r *Run, prompt, goal strin
 			}
 		}
 	}
-	if err := d.SendPrompt(ctx, r.Session, prompt); err != nil {
+	if err := d.SendPrompt(ctx, r.Session, prompt, r.Sent); err != nil {
 		return err
 	}
-	r.Prompted, r.Fresh = true, false
+	r.Prompted, r.Fresh, r.Sent = true, false, r.Sent+1
 	if r.Step == StepWork {
 		r.Blockers = nil // they have been passed on
 	}
@@ -718,10 +718,10 @@ func (rn *Runner) observe(ctx context.Context, d Daemon, r *Run) (Outcome, bool,
 					return Outcome{}, false, err
 				}
 				if missing != "" {
-					if err := d.SendPrompt(ctx, r.Session, "You ended your turn, but "+missing+" Carry on until it is done."); err != nil {
+					if err := d.SendPrompt(ctx, r.Session, "You ended your turn, but "+missing+" Carry on until it is done.", r.Sent); err != nil {
 						return Outcome{}, false, err
 					}
-					r.NudgedAt, r.Nudges = len(events), r.Nudges+1
+					r.NudgedAt, r.Nudges, r.Sent = len(events), r.Nudges+1, r.Sent+1
 					rn.logf("run %s: session %s stopped short at %s (%s); told it so", r.Home, r.Session, r.Step, missing)
 					return Outcome{}, false, rn.save(r)
 				}
