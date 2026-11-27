@@ -197,8 +197,13 @@ private fun Screens(vm: RhoViewModel, systemDark: Boolean, opening: String?, onO
         onDispose { owner.lifecycle.removeObserver(observer) }
     }
 
+    val unsentAnswers by vm.unsentPermissionAnswers.collectAsState()
     permission?.let { req ->
-        PermissionSheet(request = req, onAnswer = { vm.answerPermission(it) })
+        PermissionSheet(
+            request = req,
+            waiting = req.requestId in unsentAnswers,
+            onAnswer = { vm.answerPermission(it) },
+        )
     }
 
     ask?.let { req ->
