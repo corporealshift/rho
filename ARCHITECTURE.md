@@ -51,6 +51,7 @@ cmd/rho/                 the single binary (daemon + CLI subcommands)
 clients/                  go-tui/ android/ rust-gui/ goclient/
                           github/ — watcher: polls GitHub, runs sessions in worktrees, posts reviews and replies
                           runs/ — the runner: takes a /run brief to a PR in one session, with Claude reviewing the work
+                          tray/ — the desktop tray icon: polls one session's task progress into an icon, a tooltip and a read-only menu (Linux, Windows)
 docs/specs/               design specs: what was decided, and what was rejected
 docs/plans/               implementation plans, one per piece of work
 docs/proposals/           ideas not yet decided on

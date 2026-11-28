@@ -34,6 +34,8 @@ usage: rho [flags]              open the interactive UI on a new session
   run <prompt>      start a headless run in the current workspace
   status [id]       show session state, or list sessions
   attach <id>       stream a session's events
+  tray              show a session's task progress in the desktop tray
+                    (Linux and Windows; polls, never answers a prompt)
   stop <id>         stop a session
   resume <id>       resume a paused session
   archive <id>      put a session away; it stops being listed
@@ -91,6 +93,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdStatus(args[1:], stdout, stderr)
 	case "attach":
 		return cmdAttach(args[1:], stdout, stderr)
+	case "tray":
+		return cmdTray(args[1:], stdout, stderr)
 	case "stop":
 		return cmdStop(args[1:], stdout, stderr)
 	case "resume":

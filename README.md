@@ -256,7 +256,15 @@ rho notes [--all]     # the agent's working notes for this repository
 rho stats [id]        # a session's numbers as JSON, or tokens per day
 rho daemon            # run the daemon in the foreground
 rho daemon stop       # stop it
+rho tray              # a session's task progress in the desktop tray
 ```
+
+`rho tray` puts an icon in the notification area: the busiest session, or the one
+`--session <id>` names, as an icon that fills as its tasks finish, a tooltip, and a
+read-only menu of its task rows. It polls the daemon, never subscribes, and never answers
+a permission prompt — so it cannot hold a session waiting. It waits for a daemon rather
+than starting one. Linux and Windows; see
+[docs/specs/2026-11-27-tray-icon-design.md](docs/specs/2026-11-27-tray-icon-design.md).
 
 ## More
 

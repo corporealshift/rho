@@ -339,13 +339,17 @@ func (c *Client) State(ctx context.Context, sessionID string) (protocol.State, e
 
 // SessionSummary is one row of rho.session.list.
 type SessionSummary struct {
-	SessionID  string    `json:"session_id"`
-	Workspace  string    `json:"workspace"`
-	State      string    `json:"state"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	LastPrompt string    `json:"last_prompt,omitempty"`
-	Parent     string    `json:"parent,omitempty"`
-	Labels     []string  `json:"labels,omitempty"`
+	SessionID string    `json:"session_id"`
+	Workspace string    `json:"workspace"`
+	State     string    `json:"state"`
+	UpdatedAt time.Time `json:"updated_at"`
+	// TasksTotal and TasksDone are in the daemon's summary already; a client
+	// that only ranks sessions needs them without fetching each log.
+	TasksTotal int      `json:"tasks_total"`
+	TasksDone  int      `json:"tasks_done"`
+	LastPrompt string   `json:"last_prompt,omitempty"`
+	Parent     string   `json:"parent,omitempty"`
+	Labels     []string `json:"labels,omitempty"`
 }
 
 // List fetches the sessions the daemon knows about.
