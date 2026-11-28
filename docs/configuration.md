@@ -230,6 +230,21 @@ name the repositories it may read:
 climbs out of a named root with `../` is refused. With nothing configured, the argument
 isn't offered at all.
 
+### `builtins`: how much a tool returns
+
+```json
+{ "modules": { "builtins": { "max_output": 12288, "read_lines": 400 } } }
+```
+
+- `max_output` caps any one tool result in bytes. Past it, the first three quarters and
+  the last quarter are kept, with a marker saying how much was cut. Default 32768.
+- `read_lines` is how many lines `read` returns when the model names no `limit`. A file
+  longer than that ends with its total line count and the offset to read on from.
+  Default 400.
+
+Both count against the session's window on every later request, so on a small local
+window smaller values let a session work longer before it summarizes.
+
 ### `memory`
 
 On by default. After a session ends, a curator writes anything worth keeping as markdown
