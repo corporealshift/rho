@@ -463,8 +463,13 @@ wherever shown.
 ### 7.2 `rho.session.list {archived?}` → `{sessions: [SessionSummary]}`
 
 `SessionSummary = {session_id, workspace, workspace_key, state, event_count,
-created_at, updated_at, goal?: {condition, state}, tasks?: {total, done}, last_prompt?,
+created_at, updated_at, goal?: {condition, state}, tasks_total, tasks_done, last_prompt?,
 archived?, parent?, labels?}`.
+
+`tasks_total` and `tasks_done` are counts of the projected task list, always present: a
+session with no tasks says `0` and `0`. They are flat because that is what the daemon has
+always sent, and what the phone notification payload carries under the same two names
+(`docs/specs/2026-10-06-phone-notifications-design.md`).
 
 `parent` and `labels` are the projected options (§5). They are carried so a list can
 group sessions under their parent, and show their labels, without fetching each log.
