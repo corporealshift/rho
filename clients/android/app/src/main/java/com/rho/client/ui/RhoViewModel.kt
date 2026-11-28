@@ -206,6 +206,8 @@ class RhoViewModel(app: Application) : AndroidViewModel(app) {
             c.connect()
             client = c
             onConnected()
+            // An answer given while offline goes before anything else.
+            sendAnswers(c)
             runConnected(c)
         } finally {
             // A newer connection's catch-up is its own to end.
@@ -279,7 +281,17 @@ class RhoViewModel(app: Application) : AndroidViewModel(app) {
                         _tapped.value = _tapped.value - msg.value.sessionId
                     }
                 }
-                is Incoming.Permission -> _pendingPermission.value = msg.value
+                is Incoming.Permission -> {
+                    // Asked again after an answer that never arrived: give the
+                    // same answer instead of asking the person twice.
+                    val given = permissionAnswers.answerFor(msg.value.requestId, msg.value.id)
+                    if (given == null) {
+                        _pendingPermission.value = msg.value
+                    } else {
+                        runCatching { c.respond(given.rpcId, permissionReply(given.approve)) }
+                            .onSuccess { permissionAnswers.sent(given.requestId) }
+                    }
+                }
                 is Incoming.Ask -> _asks.value = withQuestion(_asks.value, msg.value)
                 else -> Unit
             }
@@ -290,14 +302,34 @@ class RhoViewModel(app: Application) : AndroidViewModel(app) {
     val pendingPermission: StateFlow<com.rho.client.net.PermissionRequest?> =
         _pendingPermission.asStateFlow()
 
+    private val permissionAnswers = PermissionAnswers()
+
+    /** Prompts answered here that no connection has taken yet. */
+    val unsentPermissionAnswers: StateFlow<Set<String>> = permissionAnswers.unsent
+
+    /**
+     * Answers the prompt on screen. With no connection the answer is kept and
+     * goes on the next one, and the prompt stays up saying so until then:
+     * dropping it silently is what made holding to approve look broken.
+     */
     fun answerPermission(approve: Boolean) {
         val req = _pendingPermission.value ?: return
-        val c = client ?: return
-        viewModelScope.launch {
-            runCatching {
-                c.respond(req.id, permissionReply(approve))
+        permissionAnswers.record(req.requestId, req.id, approve)
+        val c = client
+        if (c == null) {
+            loop.nudge()
+            return
+        }
+        viewModelScope.launch { sendAnswers(c) }
+    }
+
+    /** Hands every unsent answer to [c], closing each prompt it takes. */
+    private suspend fun sendAnswers(c: DaemonClient) {
+        for (a in permissionAnswers.pending()) {
+            runCatching { c.respond(a.rpcId, permissionReply(a.approve)) }.onSuccess {
+                permissionAnswers.sent(a.requestId)
+                if (_pendingPermission.value?.requestId == a.requestId) _pendingPermission.value = null
             }
-            _pendingPermission.value = null
         }
     }
 

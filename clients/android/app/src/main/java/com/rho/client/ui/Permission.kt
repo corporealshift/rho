@@ -46,6 +46,9 @@ fun permissionReply(approve: Boolean) = buildJsonObject {
     put("verdict", if (approve) "approve" else "deny")
 }
 
+/** What the prompt says once answered while there is no connection to send it on. */
+const val WAITING_NOTE = "Not connected. Your answer will be sent when rho reconnects."
+
 /** Whether approving takes a deliberate long press rather than a tap. */
 fun needsHold(request: PermissionRequest) =
     request.risk.lowercase() !in TAPPABLE
@@ -74,6 +77,7 @@ fun approveLabel(request: PermissionRequest, readToEnd: Boolean) = when {
 fun PermissionSheet(
     request: PermissionRequest,
     onAnswer: (Boolean) -> Unit,
+    waiting: Boolean = false,
 ) {
     val c = RhoTheme.colors
     val scroll = rememberScrollState()
@@ -81,7 +85,7 @@ fun PermissionSheet(
         derivedStateOf { scroll.value >= scroll.maxValue - 4 }
     }
     val hold = needsHold(request)
-    val enabled = canApprove(request, readToEnd)
+    val enabled = canApprove(request, readToEnd) && !waiting
     var nudged by remember(request.requestId) { mutableStateOf(false) }
 
     AlertDialog(
@@ -113,7 +117,14 @@ fun PermissionSheet(
                         color = c.codeInk,
                     )
                 }
-                if (hold) {
+                if (waiting) {
+                    Spacer(Modifier.padding(4.dp))
+                    Text(
+                        WAITING_NOTE,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = c.muted,
+                    )
+                } else if (hold) {
                     Spacer(Modifier.padding(4.dp))
                     Text(
                         if (!readToEnd) "Scroll to the end before you can approve."
@@ -130,6 +141,7 @@ fun PermissionSheet(
         confirmButton = {
             Button(
                 onClick = { onAnswer(false) },
+                enabled = !waiting,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = c.accent,
                     contentColor = c.onAccent,
