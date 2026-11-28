@@ -115,6 +115,75 @@ func TestSecondDaemonRefusesWhileOneIsLive(t *testing.T) {
 	}
 }
 
+// Two daemons started together can both find no pid file. The one that loses
+// the bind must leave the winner's files alone, or every client after it sees
+// no daemon, starts another, and that one deletes the files again.
+func TestDaemonThatLosesTheBindKeepsTheWinnersFiles(t *testing.T) {
+	first := newDaemon(t)
+	if err := first.Listen(); err != nil {
+		t.Fatal(err)
+	}
+	defer first.Shutdown(context.Background())
+
+	// The race window: the second daemon looks before the first's pid file is there.
+	pidPath := filepath.Join(first.Root(), PIDFile)
+	pidBytes, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(pidPath); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := New(Options{Root: first.Root(), Bind: first.Addr(), LogWriter: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Listen(); err == nil {
+		_ = second.Shutdown(context.Background())
+		t.Fatal("a second daemon must not bind the first's address")
+	}
+
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Errorf("the losing daemon wrote a pid file: %v", err)
+	}
+	port, err := os.ReadFile(filepath.Join(first.Root(), PortFile))
+	if err != nil {
+		t.Fatalf("the losing daemon removed the winner's port file: %v", err)
+	}
+	if got := strings.TrimSpace(string(port)); got != first.Addr() {
+		t.Errorf("port file: got %q, want %q", got, first.Addr())
+	}
+
+	// Put the winner's pid back: a client must find it again.
+	if err := os.WriteFile(pidPath, pidBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := RunningAddr(first.Root()); !ok {
+		t.Error("RunningAddr: the winning daemon should still be found")
+	}
+}
+
+// Releasing must never delete a pid file that names another process.
+func TestReleaseLeavesAnotherProcesssPidFile(t *testing.T) {
+	d := newDaemon(t)
+	pidPath := filepath.Join(d.Root(), PIDFile)
+	portPath := filepath.Join(d.Root(), PortFile)
+	other := fmt.Sprint(os.Getppid())
+	if err := os.WriteFile(pidPath, []byte(other), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(portPath, []byte("127.0.0.1:1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d.releasePID()
+	for _, p := range []string{pidPath, portPath} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was removed: %v", filepath.Base(p), err)
+		}
+	}
+}
+
 // A pid file left by a crashed daemon must not block a new one.
 func TestStalePidFileIsTakenOver(t *testing.T) {
 	d := newDaemon(t)

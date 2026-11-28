@@ -24,6 +24,9 @@ type Builtins struct {
 	BashTimeout time.Duration
 	// MaxOutput caps tool output bytes. 0 = 32 KiB.
 	MaxOutput int
+	// ReadLines is how many lines a read returns when the model names no
+	// limit. 0 = defaultReadLines.
+	ReadLines int
 	// Roots are other repositories this daemon may read, by name. Reads only:
 	// write, edit and bash never consult it.
 	Roots Roots
@@ -32,7 +35,8 @@ type Builtins struct {
 // Name implements module.Module.
 func (b *Builtins) Name() string { return "builtins" }
 
-// Init implements module.Module; reads shell, bash_timeout_seconds, max_output.
+// Init implements module.Module; reads shell, bash_timeout_seconds,
+// max_output and read_lines.
 func (b *Builtins) Init(_ module.Host, cfg module.Config) error {
 	if b.Shell == "" {
 		b.Shell = cfg.String("shell", "")
@@ -42,6 +46,9 @@ func (b *Builtins) Init(_ module.Host, cfg module.Config) error {
 	}
 	if b.MaxOutput == 0 {
 		b.MaxOutput = cfg.Int("max_output", 32<<10)
+	}
+	if b.ReadLines == 0 {
+		b.ReadLines = cfg.Int("read_lines", defaultReadLines)
 	}
 	if b.Roots == nil {
 		b.Roots = parseRoots(cfg)
@@ -56,6 +63,19 @@ func (b *Builtins) Tools() []module.Tool {
 		tools = append(tools, b.taskTool())
 	}
 	return tools
+}
+
+// defaultReadLines is a read's window when the model names no limit. Most
+// reads want one function or one section, and a whole file read every time
+// is most of what fills a session's window: on a 64k window, three 2,000-line
+// reads were a third of it, and each was read again after every summary.
+const defaultReadLines = 400
+
+func (b *Builtins) readLines() int {
+	if b.ReadLines > 0 {
+		return b.ReadLines
+	}
+	return defaultReadLines
 }
 
 func (b *Builtins) maxOutput() int {

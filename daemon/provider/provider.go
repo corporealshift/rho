@@ -110,6 +110,10 @@ type Config struct {
 	// KeepThinking sends each assistant turn back with the thinking it was
 	// written after (docs/specs/2026-10-17-thinking-goes-back-design.md).
 	KeepThinking bool
+	// SummarizeInPlace writes a summary on the session's own next request plus
+	// one message, so a server's prefix cache serves nearly all of it
+	// (docs/specs/2026-11-27-summary-on-the-cache-design.md).
+	SummarizeInPlace bool
 }
 
 // DefaultRepeatLimit is the copies in a row that stop a reply. The reply that

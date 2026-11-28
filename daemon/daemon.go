@@ -186,6 +186,8 @@ func New(opts Options) (*Daemon, error) {
 
 				SummaryThinking: p.SummaryThinking,
 				KeepThinking:    p.KeepThinking,
+
+				SummarizeInPlace: p.SummarizeInPlace,
 			}
 			providers.Add(pc, provider.NewOpenAI(pc, nil), isFirst)
 			isFirst = false
@@ -336,19 +338,25 @@ func (d *Daemon) Addr() string {
 	return d.listener.Addr().String()
 }
 
-// Listen claims the pid file, binds the socket, and writes the port file. It
-// refuses to start when a live daemon already holds the pid file, and takes
+// Listen binds the socket, then claims the pid file and writes the port file.
+// It refuses to start when a live daemon already holds the pid file, and takes
 // over a stale one.
 func (d *Daemon) Listen() error {
-	if err := d.claimPID(); err != nil {
-		return err
+	if pid, ok := readPID(d.pidPath()); ok && processAlive(pid) {
+		return fmt.Errorf("%w (pid %d)", ErrAlreadyRunning, pid)
 	}
+	// Bind before touching the pid and port files. The port is the real lock:
+	// two daemons starting together can both find no live pid file, and the
+	// one that loses the bind must leave the winner's files alone.
 	ln, err := net.Listen("tcp", d.cfg.Daemon.Bind)
 	if err != nil {
-		d.releasePID()
 		return fmt.Errorf("daemon: binding %s: %w", d.cfg.Daemon.Bind, err)
 	}
 	d.listener = ln
+	if err := d.claimPID(); err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("daemon: writing pid file: %w", err)
+	}
 
 	// The whole address: a daemon off loopback is reachable only at the one
 	// it bound.
@@ -464,16 +472,18 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 func (d *Daemon) pidPath() string  { return filepath.Join(d.root, PIDFile) }
 func (d *Daemon) portPath() string { return filepath.Join(d.root, PortFile) }
 
-// claimPID writes this process's pid, refusing if a live daemon holds it.
-// A pid file left by a crashed daemon is stale and is taken over.
+// claimPID writes this process's pid. Listen calls it only once the port is
+// bound, so a pid file already there is stale and is taken over.
 func (d *Daemon) claimPID() error {
-	if pid, ok := readPID(d.pidPath()); ok && processAlive(pid) {
-		return fmt.Errorf("%w (pid %d)", ErrAlreadyRunning, pid)
-	}
 	return os.WriteFile(d.pidPath(), []byte(strconv.Itoa(os.Getpid())), 0o644)
 }
 
+// releasePID removes the pid and port files, but only while the pid file is
+// this process's: another daemon's files are never this one's to delete.
 func (d *Daemon) releasePID() {
+	if pid, ok := readPID(d.pidPath()); !ok || pid != os.Getpid() {
+		return
+	}
 	_ = os.Remove(d.pidPath())
 	_ = os.Remove(d.portPath())
 }

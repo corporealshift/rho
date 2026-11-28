@@ -110,7 +110,10 @@ Every `source` field, where present, is one of `daemon`, `model`, `client`, or
   `enable_thinking: false`, every other level as `reasoning_effort` with the level as
   written. The server gives each level its meaning; on a server whose template knows
   fewer levels, several may behave the same. A summary the daemon writes does not use
-  it. Like `context`, the daemon acts on it, on every model call.
+  it, except where its provider summarizes in place: that summary is asked for on the
+  session's own request and uses the session's effort, since a different one would change
+  the prompt from its start (`docs/specs/2026-11-27-summary-on-the-cache-design.md`).
+  Like `context`, the daemon acts on it, on every model call.
 
 The daemon's core records both and attaches no meaning to either: grouping sessions under
 a parent, or acting on a label, is for clients and modules. An absent `parent` or `labels`
