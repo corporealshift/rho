@@ -62,6 +62,17 @@ local model. This page lists every setting.
   before a tool call works it out again after. Off by default: not every server accepts
   it, and requests grow by the thinking, so sessions compact sooner. Thinking goes back
   as it was logged, with repeats trimmed, and only since the last summary.
+- **`summarize_in_place`**: `true` asks for a summary on the session's own next request,
+  with one more message asking for it, instead of on a new transcript. A server with a
+  prefix cache (llama-server, Strata) reads nearly all of it from the cache, so a summary
+  takes about as long as writing it, and the summariser has seen every file whole, so it
+  keeps what they showed and the session reads them less often afterwards. The summary
+  thinks at the session's effort: `summary_thinking` does not apply, because turning
+  thinking off changes the start of the prompt and loses the cache. When the window has
+  no room left for a summary, or the reply calls a tool or is empty, the transcript
+  summary is used, with a notice. Off by default: a server without a prefix cache would
+  read the whole session for every summary
+  (docs/specs/2026-11-27-summary-on-the-cache-design.md).
 
 ### Compaction
 
