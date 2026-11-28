@@ -16,12 +16,7 @@ import (
 // recommends: decisions, unresolved problems, and what was actually done.
 const summarizePrompt = `Summarize the conversation so far for an agent that will continue the work with no other memory of it.
 
-Keep, in this order:
-1. What the user asked for, in their terms, including constraints they stated.
-2. Decisions made and why, including approaches that were tried and rejected.
-3. What has actually been done: files changed, commands run and their results.
-4. What is unresolved within what the user asked for: open questions, failing checks, known bugs. Work the user did not ask for is not unresolved; do not list it.
-5. Anything the next turn must not do.
+` + summaryKeeps + `
 
 An earlier summary, when given, is replaced by yours: carry forward everything in it that still holds, and drop what is finished.
 
@@ -34,6 +29,32 @@ Drop pleasantries, repeated tool output, and narration. Be specific: name files,
 Keep the summary under about 2,000 words: the agent re-reads it with every request. Facts you are told to preserve verbatim are kept whole, even past that.
 
 The conversation is a record to summarise, not one you are taking part in. Do not continue it, answer it, or call tools.`
+
+// summaryKeeps is what either kind of summary keeps, in order.
+const summaryKeeps = `Keep, in this order:
+1. What the user asked for, in their terms, including constraints they stated.
+2. Decisions made and why, including approaches that were tried and rejected.
+3. What has actually been done: files changed, commands run and their results.
+4. What is unresolved within what the user asked for: open questions, failing checks, known bugs. Work the user did not ask for is not unresolved; do not list it.
+5. Anything the next turn must not do.`
+
+// summarizeInPlacePrompt is the last message of a summary asked for on the
+// session's own request. Unlike the transcript's summariser, this one has seen
+// every file whole, so it is asked to keep what they showed: otherwise the
+// agent after it reads them all again
+// (docs/specs/2026-11-27-summary-on-the-cache-design.md).
+const summarizeInPlacePrompt = `Stop the work here and do not call any tools. Everything in this conversation apart from the system message is about to be replaced by a summary, and the agent that continues the work will have no other memory of it. Write that summary now.
+
+` + summaryKeeps + `
+6. What the files you read showed, where the next steps depend on it: the names, signatures, types, line numbers and behaviour you relied on, so the agent after you need not read them again. Facts, a line or two a file; never paste their contents.
+
+An earlier summary in the system message, if there is one, is replaced by yours: carry forward everything in it that still holds, and drop what is finished.
+
+Where a message from the user later than something you wrote contradicts it, say it is out of date: the user's message wins.
+
+Drop pleasantries, repeated tool output, and narration. Be specific: name files, commands and errors. Do not invent anything that is not in the conversation.
+
+Keep the summary under about 2,000 words: the agent re-reads it with every request. Facts you are told to preserve verbatim are kept whole, even past that. Keep your thinking short: the summary is the answer. Output only the summary.`
 
 // summarizeClosing follows the transcript. A long transcript buries the system
 // prompt, and a model that reaches the end of one with no fresh instruction
@@ -316,33 +337,28 @@ func (m *Manager) summarizeLocked(ctx context.Context, h *sessionHandle) error {
 
 	preserve := m.deps.Modules.BeforeCompaction(ctx, h, rng)
 
-	// The new summary replaces the last one in every request, so the
-	// summariser must see it: what it does not carry forward is gone.
-	transcript := "<conversation>\n" + renderForSummary(log[start:]) + "</conversation>\n\n" + summarizeClosing
-	if earlier := lastSummary(log); earlier != "" {
-		transcript = "<earlier-summary>\n" + earlier + "\n</earlier-summary>\n\n" + transcript
-	}
-	sys := summarizePrompt
-	if len(preserve) > 0 {
-		sys += "\n\nThe summary MUST preserve these facts verbatim:\n- " + strings.Join(preserve, "\n- ")
-	}
 	p, modelName, pcfg, err := m.deps.Providers.Resolve(st.Options.Model)
 	if err != nil {
 		return err
 	}
-	req := provider.Request{
-		Model: modelName,
-		Messages: []provider.Message{
-			{Role: "system", Content: sys},
-			{Role: "user", Content: transcript},
-		},
-		NoThinking: pcfg.SummaryThinking != nil && !*pcfg.SummaryThinking,
+	var (
+		resp  provider.Response
+		limit int // the reply cap the summary was asked under
+	)
+	inPlace := false
+	if pcfg.SummarizeInPlace {
+		var why string
+		resp, limit, why, err = m.summarizeInPlace(ctx, h, log, st, p, modelName, pcfg, preserve)
+		if err == nil && why == "" {
+			inPlace = true
+		} else if ctx.Err() == nil {
+			h.s.Append(protocol.EventNotice, protocol.NoticeData{Source: "daemon", Level: "info",
+				Message: "summarising in place did not work (" + why + "); summarising from a transcript instead"})
+		}
 	}
-	if req.NoThinking {
-		// Thinking counts against the cap, so only a summary without it gets one.
-		req.MaxTokens = summaryCap
+	if !inPlace && ctx.Err() == nil {
+		resp, limit, err = m.summarizeFromTranscript(ctx, log[start:], lastSummary(log), p, modelName, pcfg, preserve)
 	}
-	resp, err := p.Complete(ctx, req, nil, nil)
 	if err != nil && ctx.Err() != nil {
 		// Asked to stop, not failed: leave the history exactly as it was.
 		h.s.Append(protocol.EventNotice, protocol.NoticeData{Source: "daemon", Level: "warn",
@@ -369,7 +385,6 @@ func (m *Manager) summarizeLocked(ctx context.Context, h *sessionHandle) error {
 	}
 	if resp.FinishReason == "length" {
 		// Kept: clearing results instead would leave the whole range in the request.
-		limit := req.MaxTokens
 		if limit == 0 {
 			limit = pcfg.MaxTokens
 		}
@@ -428,6 +443,80 @@ func renderForSummary(events []protocol.Event) string {
 		}
 	}
 	return b.String()
+}
+
+// summarizeInPlace asks for the summary on the request the session's next
+// turn would send, plus one message. Everything before that message is what
+// the server just read, so it comes from its cache, and the summariser sees
+// every result whole. why says what kept it from working, for the transcript
+// summary to take over; err is only an interruption.
+//
+// Nothing before the last message may differ from the turn's request: Strata's
+// template renders the effort at the head of the system message, so even
+// summary_thinking would cost the whole cache. The summary thinks at the
+// session's effort, and is asked to keep it short.
+func (m *Manager) summarizeInPlace(ctx context.Context, h *sessionHandle, log []protocol.Event, st protocol.State,
+	p provider.Provider, modelName string, pcfg provider.Config, preserve []string) (provider.Response, int, string, error) {
+	ask := summarizeInPlacePrompt
+	if len(preserve) > 0 {
+		ask += "\n\nThe summary MUST preserve these facts verbatim:\n- " + strings.Join(preserve, "\n- ")
+	}
+	// The reply's room is what the window has left, so thinking and summary
+	// together cannot overflow it.
+	room := pcfg.ContextWindow - nextRequestTokens(log, pcfg.KeepThinking) - len(ask)/charsPerToken - requestMargin
+	if room < 2*summaryCap {
+		return provider.Response{}, 0, fmt.Sprintf("only %d tokens of the window would be left for it", max(room, 0)), nil
+	}
+	req := buildRequest(log, m.cfg.SystemPrompt, modelName, m.toolsFor(pcfg, h), room, pcfg.KeepThinking)
+	req.Effort = st.Options.Effort
+	if req.Effort == "none" {
+		// No thinking either way, so the cap that bounds such a summary holds.
+		req.MaxTokens = summaryCap
+	}
+	req.Messages = append(req.Messages, provider.Message{Role: "user", Content: ask})
+	resp, err := p.Complete(ctx, req, nil, nil)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return resp, req.MaxTokens, "", ctx.Err()
+	case err != nil:
+		return resp, req.MaxTokens, "the call failed: " + err.Error(), nil
+	case len(resp.ToolCalls) > 0:
+		return resp, req.MaxTokens, "the model called a tool instead of writing it", nil
+	case strings.TrimSpace(afterReasoning(resp.Content)) == "":
+		return resp, req.MaxTokens, "the model wrote nothing", nil
+	}
+	return resp, req.MaxTokens, "", nil
+}
+
+// summarizeFromTranscript asks for the summary on a transcript of history,
+// with each tool result cut to resultShown: a new request, read whole by the
+// server, written by a summariser that saw only the start of each file.
+func (m *Manager) summarizeFromTranscript(ctx context.Context, history []protocol.Event, earlier string,
+	p provider.Provider, modelName string, pcfg provider.Config, preserve []string) (provider.Response, int, error) {
+	// The new summary replaces the last one in every request, so the
+	// summariser must see it: what it does not carry forward is gone.
+	transcript := "<conversation>\n" + renderForSummary(history) + "</conversation>\n\n" + summarizeClosing
+	if earlier != "" {
+		transcript = "<earlier-summary>\n" + earlier + "\n</earlier-summary>\n\n" + transcript
+	}
+	sys := summarizePrompt
+	if len(preserve) > 0 {
+		sys += "\n\nThe summary MUST preserve these facts verbatim:\n- " + strings.Join(preserve, "\n- ")
+	}
+	req := provider.Request{
+		Model: modelName,
+		Messages: []provider.Message{
+			{Role: "system", Content: sys},
+			{Role: "user", Content: transcript},
+		},
+		NoThinking: pcfg.SummaryThinking != nil && !*pcfg.SummaryThinking,
+	}
+	if req.NoThinking {
+		// Thinking counts against the cap, so only a summary without it gets one.
+		req.MaxTokens = summaryCap
+	}
+	resp, err := p.Complete(ctx, req, nil, nil)
+	return resp, req.MaxTokens, err
 }
 
 // resultShown is how much of each tool result the summariser sees. Whole

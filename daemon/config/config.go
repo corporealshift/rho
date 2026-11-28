@@ -114,6 +114,11 @@ type ProviderConfig struct {
 	// Off by default: not every server takes it, and requests grow
 	// (docs/specs/2026-10-17-thinking-goes-back-design.md).
 	KeepThinking bool `json:"keep_thinking"`
+	// SummarizeInPlace asks for a summary on the session's own next request,
+	// which the server already has cached, instead of on a new transcript.
+	// Off by default: only a server with a prefix cache gains from it
+	// (docs/specs/2026-11-27-summary-on-the-cache-design.md).
+	SummarizeInPlace bool `json:"summarize_in_place"`
 }
 
 // defaultSummarizeAt is the daemon's own summarize threshold, the one a
