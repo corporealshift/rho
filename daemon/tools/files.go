@@ -34,7 +34,9 @@ func (b *Builtins) readTool() module.Tool {
 	}
 	return module.Tool{
 		Name: "read",
-		Description: "Read a text file. Returns numbered lines. offset is the 1-based first line, limit the number of lines (default 2000)." +
+		Description: fmt.Sprintf("Read a text file. Returns numbered lines. offset is the 1-based first line, "+
+			"limit the number of lines (default %d). A longer file ends with how many lines it has and the offset "+
+			"to read on from: read the part you need rather than the whole file.", b.readLines()) +
 			rootsDescription(b.Roots),
 		Schema: schema(`{"type":"object","required":["path"],"properties":{
 			"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}` +
@@ -57,26 +59,29 @@ func (b *Builtins) readTool() module.Tool {
 				a.Offset = 1
 			}
 			if a.Limit < 1 {
-				a.Limit = 2000
+				a.Limit = b.readLines()
 			}
 			var sb strings.Builder
 			sc := bufio.NewScanner(f)
 			sc.Buffer(make([]byte, 0, 64<<10), 8<<20)
-			n, shown := 0, 0
+			n, shown, last := 0, 0, 0
 			for sc.Scan() {
 				n++
-				if n < a.Offset {
+				if n < a.Offset || shown >= a.Limit {
+					// Past the window, lines are only counted, so the model
+					// learns how much is left and can choose what to read.
 					continue
-				}
-				if shown >= a.Limit {
-					fmt.Fprintf(&sb, "[... more lines; continue with offset %d ...]\n", n)
-					break
 				}
 				fmt.Fprintf(&sb, "%d\t%s\n", n, sc.Text())
 				shown++
+				last = n
 			}
 			if err := sc.Err(); err != nil {
 				return "", osFail(err)
+			}
+			if shown > 0 && last < n {
+				fmt.Fprintf(&sb, "[... lines %d-%d of %d shown; continue with offset %d ...]\n",
+					a.Offset, last, n, last+1)
 			}
 			if shown == 0 && n == 0 {
 				return "(empty file)", nil

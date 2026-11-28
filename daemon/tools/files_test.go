@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,7 +53,7 @@ func TestWriteReadEdit(t *testing.T) {
 	// A truncated window tells the model how to continue, so it cannot mistake
 	// a partial read for the whole file.
 	out, _ = run(t, b, s, "read", `{"path":"a/b.txt","offset":2,"limit":1}`)
-	if out != "2\ttwo\n[... more lines; continue with offset 3 ...]\n" {
+	if out != "2\ttwo\n[... lines 2-2 of 3 shown; continue with offset 3 ...]\n" {
 		t.Fatalf("read window: %q", out)
 	}
 	out, _ = run(t, b, s, "read", `{"path":"a/b.txt","offset":3,"limit":1}`)
@@ -206,5 +207,56 @@ func TestGrepSkipsGeneratedDirectories(t *testing.T) {
 		if strings.Contains(out, d) {
 			t.Errorf("%s should not be searched, got %q", d, out)
 		}
+	}
+}
+
+// A read with no limit returns the configured window, and says how long the
+// file is, so the model reads on for what it needs instead of the whole file.
+func TestReadDefaultWindow(t *testing.T) {
+	dir := t.TempDir()
+	var lines []string
+	for i := 1; i <= 10; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := fakeSession{dir}
+
+	tests := []struct {
+		name string
+		b    *Builtins
+		args string
+		want string
+	}{
+		{"configured window", &Builtins{ReadLines: 3}, `{"path":"f.txt"}`,
+			"1\tline 1\n2\tline 2\n3\tline 3\n[... lines 1-3 of 10 shown; continue with offset 4 ...]\n"},
+		{"window from an offset", &Builtins{ReadLines: 3}, `{"path":"f.txt","offset":8}`,
+			"8\tline 8\n9\tline 9\n10\tline 10\n"},
+		{"an explicit limit wins", &Builtins{ReadLines: 3}, `{"path":"f.txt","limit":1}`,
+			"1\tline 1\n[... lines 1-1 of 10 shown; continue with offset 2 ...]\n"},
+		{"default fits a short file", &Builtins{}, `{"path":"f.txt"}`,
+			strings.Join(func() []string {
+				var w []string
+				for i, l := range lines {
+					w = append(w, fmt.Sprintf("%d\t%s", i+1, l))
+				}
+				return w
+			}(), "\n") + "\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := run(t, tt.b, s, "read", tt.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q\nwant %q", got, tt.want)
+			}
+		})
+	}
+
+	if got := (&Builtins{}).readLines(); got != defaultReadLines {
+		t.Errorf("unconfigured window: got %d, want %d", got, defaultReadLines)
 	}
 }
